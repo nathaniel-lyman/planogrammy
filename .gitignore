@@ -1,0 +1,11 @@
+/target
+/node_modules
+/apps/web/node_modules
+/apps/web/dist
+/apps/web/src/wasm/pkg
+/apps/web/test-results
+*.tsbuildinfo
+*.log
+.DS_Store
+/artifacts/**/render-work/
+/artifacts/**/render-work-elevenlabs/

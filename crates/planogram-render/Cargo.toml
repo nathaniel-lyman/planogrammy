@@ -1,0 +1,18 @@
+[package]
+name = "planogram-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+planogram-core = { path = "../planogram-core" }
+serde.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Element", "HtmlCanvasElement", "Window"] }
+wgpu = { version = "26", features = ["webgpu"] }

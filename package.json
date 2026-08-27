@@ -1,0 +1,12 @@
+{
+  "name": "planogrammy",
+  "private": true,
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
+    "test": "npm --workspace apps/web run test",
+    "typecheck": "npm --workspace apps/web run typecheck",
+    "wasm": "npm --workspace apps/web run wasm"
+  }
+}

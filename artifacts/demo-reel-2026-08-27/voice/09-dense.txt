@@ -1,0 +1,1 @@
+The dense proposal passes every tray, spacing, and brand-block constraint before approval.

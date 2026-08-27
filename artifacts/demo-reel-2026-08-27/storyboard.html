@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planogrammy demo reel storyboard</title>
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif; color: white; background: #11151a; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    #frame { position: relative; width: 1280px; height: 720px; overflow: hidden; background: #11151a center/cover no-repeat; }
+    #frame::after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+    .wash { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10,14,19,.02) 40%, rgba(10,14,19,.88) 100%); }
+    .wash.dim { background: rgba(10,14,19,.62); backdrop-filter: blur(2px); }
+    .topline { position: absolute; top: 26px; left: 30px; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid rgba(255,255,255,.22); border-radius: 999px; background: rgba(14,20,26,.84); font-size: 12px; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #4d8dff; box-shadow: 0 0 16px rgba(77,141,255,.8); }
+    .copy { position: absolute; left: 34px; right: 34px; bottom: 30px; padding: 22px 26px 20px; border: 1px solid rgba(255,255,255,.15); border-radius: 14px; background: rgba(13,18,23,.88); box-shadow: 0 18px 50px rgba(0,0,0,.28); }
+    .copy h1 { max-width: 1050px; margin: 0; font-size: 35px; line-height: 1.06; letter-spacing: -.035em; }
+    .copy p { max-width: 1120px; margin: 10px 0 0; color: #d8e0e7; font-size: 18px; line-height: 1.36; }
+    .copy .meta { margin-top: 12px; color: #91b7ff; font-size: 14px; font-weight: 760; letter-spacing: .02em; }
+    .prompt { position: absolute; left: 315px; right: 315px; top: 170px; padding: 30px 34px; border: 1px solid rgba(255,255,255,.25); border-radius: 18px; background: rgba(248,250,252,.96); color: #151a20; box-shadow: 0 28px 80px rgba(0,0,0,.4); }
+    .prompt .label { display: flex; align-items: center; gap: 10px; color: #375d9d; font-size: 12px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    .prompt .avatar { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: #185bd8; color: white; font-size: 13px; }
+    .prompt blockquote { margin: 18px 0 0; font-size: 31px; font-weight: 760; line-height: 1.22; letter-spacing: -.025em; }
+    .prompt .hint { margin-top: 16px; color: #65707a; font-size: 14px; }
+    .focus-left { position: absolute; inset: 0 68% 0 0; border-right: 1px solid rgba(255,255,255,.18); box-shadow: 25px 0 70px rgba(14,20,26,.12); }
+    .metric-card { position: absolute; left: 325px; top: 105px; width: 540px; padding: 26px 28px; border: 1px solid rgba(255,255,255,.18); border-radius: 14px; background: rgba(14,20,26,.92); box-shadow: 0 24px 70px rgba(0,0,0,.32); }
+    .metric-card h1 { margin: 0; font-size: 30px; letter-spacing: -.03em; }
+    .chips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 18px; }
+    .chips span { padding: 9px 12px; border: 1px solid rgba(145,183,255,.4); border-radius: 999px; background: rgba(38,92,184,.2); color: #e7efff; font-size: 14px; font-weight: 730; }
+    .local { color: #8ae0a7 !important; }
+  </style>
+</head>
+<body>
+  <main id="frame" aria-label="Planogrammy demo reel frame">
+    <div id="wash" class="wash"></div>
+    <div id="topline" class="topline"><span class="dot"></span><span id="eyebrow"></span></div>
+    <section id="prompt" class="prompt" hidden>
+      <div class="label"><span class="avatar">U</span>User request</div>
+      <blockquote id="quote"></blockquote>
+      <div class="hint">The agent works through Planogrammy's live semantic tools.</div>
+    </section>
+    <section id="metricCard" class="metric-card" hidden>
+      <h1>Performance + logistics, in one catalog view</h1>
+      <div class="chips"><span>Depth</span><span>Net weight</span><span>SSW</span><span>USW</span><span>Gross margin</span><span>Casepack</span><span>Loaded tray footprint</span></div>
+    </section>
+    <section id="copy" class="copy">
+      <h1 id="headline"></h1>
+      <p id="caption"></p>
+      <p id="meta" class="meta"></p>
+    </section>
+  </main>
+  <script>
+    const scenes = {
+      title: { bg: '01-catalog-and-empty-mod.png', eyebrow: 'Local product demo', headline: 'Merchandising intent becomes exact, reviewable shelf changes.', caption: 'Planogrammy combines a Rust/Wasm domain engine, a WebGPU canvas, and live WebMCP agent tools.', meta: 'DETERMINISTIC • VALIDATED • REVISION-SAFE' },
+      fields: { bg: '07-tray-performance-fields.png', eyebrow: 'New catalog intelligence', metric: true, headline: 'Every metric stays exact and explainable.', caption: 'Depth, net weight, SSW, USW, margin, casepack, and loaded tray geometry are visible together.', meta: 'TRAILING 13-WEEK SYNTHETIC DEMO DATA • NOT RETAILER ACTUALS' },
+      prompt1: { bg: '01-catalog-and-empty-mod.png', eyebrow: 'Merchandising brief', prompt: 'Fill this 4-foot mod with all 22 SKUs in contiguous brand blocks.', headline: 'Ask for the outcome, not pixel coordinates.', caption: 'The agent reads the open draft, catalog, fixture, and physical constraints.' },
+      proposal1: { bg: '02-brand-block-proposal.png', eyebrow: 'Non-mutating proposal', headline: '22 additions • 6 brand blocks • all constraints pass', caption: 'Rust resolves tray footprints, exact coordinates, and the 1/8-inch minimum gap before anything changes.', meta: 'REVISION 0 • PREVIEW ONLY' },
+      approve1: { bg: '03-brand-block-approved.png', eyebrow: 'Human approval boundary', headline: 'One approval records one atomic change set.', caption: 'The mod is filled only after the user accepts the reviewed proposal.', meta: 'REVISION 0 → 1 • CHANGE_0001' },
+      prompt2: { bg: '03-brand-block-approved.png', eyebrow: 'Performance brief', prompt: 'Remove low performing items and spread the strongest sellers.', headline: 'The agent can reason from the new performance fields.', caption: 'Brand blocking remains a constraint while the assortment changes.' },
+      proposal2: { bg: '04-performance-proposal.png', eyebrow: 'Performance-led proposal', headline: '7 stronger additions • 7 removals • 5 deterministic moves', caption: 'The lowest sales-per-store-per-week items are replaced without breaking the approved brand blocks.', meta: 'REVISION 1 • PREVIEW ONLY • ALL CONSTRAINTS PASS' },
+      approve2: { bg: '05-performance-approved.png', eyebrow: 'Approved optimization', headline: 'The optimized assortment lands as one reviewable revision.', caption: 'Every before-and-after operation is retained for audit and undo.', meta: 'REVISION 1 → 2 • CHANGE_0002' },
+      spread1: { bg: '06-spread-1.png', eyebrow: 'Rust-resolved distribution • 1 of 6', headline: 'High performers spread across available shelf width.', caption: 'Space-evenly preserves order, stays on the 1/8-inch grid, and validates every shelf.' },
+      spread2: { bg: '06-spread-2.png', eyebrow: 'Rust-resolved distribution • 2 of 6', headline: 'High performers spread across available shelf width.', caption: 'Space-evenly preserves order, stays on the 1/8-inch grid, and validates every shelf.' },
+      spread3: { bg: '06-spread-3.png', eyebrow: 'Rust-resolved distribution • 3 of 6', headline: 'High performers spread across available shelf width.', caption: 'Space-evenly preserves order, stays on the 1/8-inch grid, and validates every shelf.' },
+      spread4: { bg: '06-spread-4.png', eyebrow: 'Rust-resolved distribution • 4 of 6', headline: 'High performers spread across available shelf width.', caption: 'Space-evenly preserves order, stays on the 1/8-inch grid, and validates every shelf.' },
+      spread5: { bg: '06-spread-5.png', eyebrow: 'Rust-resolved distribution • 5 of 6', headline: 'High performers spread across available shelf width.', caption: 'Space-evenly preserves order, stays on the 1/8-inch grid, and validates every shelf.' },
+      spread6: { bg: '06-spread-6.png', eyebrow: 'Rust-resolved distribution • 6 of 6', headline: 'High performers spread across available shelf width.', caption: 'Space-evenly preserves order, stays on the 1/8-inch grid, and validates every shelf.' },
+      final: { bg: '06-spread-6.png', eyebrow: 'Final local result', headline: '22 placements • revision 8 • all changes local', caption: 'A physically valid, performance-led mod that remains reviewable and reversible.', meta: 'NO LIVE RETAILER RECORDS TOUCHED', final: true }
+    };
+    const key = new URLSearchParams(location.search).get('scene') || 'title';
+    const scene = scenes[key] || scenes.title;
+    const frame = document.querySelector('#frame');
+    frame.style.backgroundImage = `url(${JSON.stringify(scene.bg)})`;
+    document.querySelector('#eyebrow').textContent = scene.eyebrow;
+    document.querySelector('#headline').textContent = scene.headline;
+    document.querySelector('#caption').textContent = scene.caption;
+    const meta = document.querySelector('#meta');
+    meta.textContent = scene.meta || '';
+    if (scene.final) meta.classList.add('local');
+    if (scene.prompt) {
+      document.querySelector('#wash').classList.add('dim');
+      document.querySelector('#prompt').hidden = false;
+      document.querySelector('#quote').textContent = scene.prompt;
+    }
+    if (scene.metric) document.querySelector('#metricCard').hidden = false;
+  </script>
+</body>
+</html>

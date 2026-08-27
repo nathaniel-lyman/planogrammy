@@ -1,0 +1,1 @@
+The optimization lands as one reviewable revision, with every operation retained for audit and undo.

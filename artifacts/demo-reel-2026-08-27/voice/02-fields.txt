@@ -1,0 +1,1 @@
+Catalog cards combine exact dimensions, sales, units, margin, casepack, and loaded tray footprints, clearly labeled as synthetic demo data.

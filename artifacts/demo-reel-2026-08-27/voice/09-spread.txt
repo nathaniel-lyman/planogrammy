@@ -1,0 +1,1 @@
+After approval, Planogrammy distributes each shelf deterministically across the available width.
