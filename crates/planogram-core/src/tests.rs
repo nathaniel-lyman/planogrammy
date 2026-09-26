@@ -1,0 +1,1193 @@
+use super::*;
+
+fn shelf(id: &str) -> ShelfId {
+    ShelfId::new(id)
+}
+
+fn product(id: &str) -> ProductId {
+    ProductId::new(id)
+}
+
+/// A proposal add with explicit `(x, y, z)` facings, or `None` so Rust resolves them.
+fn add_change(
+    product_id: &str,
+    shelf_id: &str,
+    sequence: u32,
+    facings: Option<(u32, u32, u32)>,
+) -> PlacementChange {
+    PlacementChange::Add {
+        placement_id: None,
+        product_id: product(product_id),
+        shelf_id: shelf(shelf_id),
+        sequence,
+        resolved_x: None,
+        facings_x: facings.map(|facings| facings.0),
+        facings_y: facings.map(|facings| facings.1),
+        facings_z: facings.map(|facings| facings.2),
+    }
+}
+
+struct Applied {
+    revision: u64,
+    change_set: ChangeSet,
+    affected_ids: Vec<String>,
+    scene_patch: Box<ScenePatch>,
+}
+
+fn expect_applied(result: CommandResult) -> Applied {
+    match result {
+        CommandResult::Applied {
+            revision,
+            change_set,
+            affected_ids,
+            scene_patch,
+            ..
+        } => Applied {
+            revision,
+            change_set,
+            affected_ids,
+            scene_patch,
+        },
+        result => panic!("expected an applied command, got {result:?}"),
+    }
+}
+
+/// Setup helper: a direct add at the current revision that must apply.
+fn add(draft: &mut DraftVersion, product_id: &str, shelf_id: &str) -> Applied {
+    let version = draft.id.clone();
+    let revision = draft.revision;
+    expect_applied(draft.add_placement(
+        &version,
+        &product(product_id),
+        &shelf(shelf_id),
+        revision,
+        "test setup",
+    ))
+}
+
+fn has_issue(validation: &ValidationSummary, code: ValidationCode) -> bool {
+    validation.issues.iter().any(|issue| issue.code == code)
+}
+
+/// Runs a command that must fail validation with `code` without changing geometry,
+/// revision, or history.
+fn assert_rejected_unchanged(
+    draft: &mut DraftVersion,
+    code: ValidationCode,
+    command: impl FnOnce(&mut DraftVersion) -> CommandResult,
+) {
+    let before = draft.clone();
+    let result = command(draft);
+    assert!(
+        matches!(
+            &result,
+            CommandResult::ValidationFailed { revision, validation }
+                if *revision == before.revision && has_issue(validation, code)
+        ),
+        "expected {code:?} at revision {}, got {result:?}",
+        before.revision
+    );
+    assert_eq!(*draft, before);
+}
+
+/// Placement views on one shelf, in stored placement order.
+fn shelf_views(draft: &DraftVersion, shelf_id: &str) -> Vec<PlacementView> {
+    draft
+        .placement_views()
+        .into_iter()
+        .filter(|view| view.shelf_id == shelf(shelf_id))
+        .collect()
+}
+
+#[test]
+fn default_fixture_is_exact_and_deterministic() {
+    let fixture = default_fixture();
+    assert_eq!(fixture.width.sixteenths(), 768);
+    assert_eq!(fixture.height.sixteenths(), 1_344);
+    let shelves = fixture.sections[0]
+        .shelves
+        .iter()
+        .map(|shelf| (shelf.kind, shelf.elevation.sixteenths()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shelves,
+        vec![
+            (ShelfKind::BaseDeck, 0),
+            (ShelfKind::Adjustable, 192),
+            (ShelfKind::Adjustable, 384),
+            (ShelfKind::Adjustable, 576),
+            (ShelfKind::Adjustable, 768),
+            (ShelfKind::Adjustable, 960),
+            (ShelfKind::Adjustable, 1_152),
+        ]
+    );
+}
+
+#[test]
+fn exact_length_conversions() {
+    assert_eq!(Length::inches(1).sixteenths(), 16);
+    assert_eq!(Length::inches(12).sixteenths(), 192);
+    assert_eq!(Length::feet(1).sixteenths(), 192);
+    assert_eq!(Length::from_sixteenths(200).sixteenths(), 200);
+}
+
+#[test]
+fn whole_plan_validation_reports_the_current_revision_without_mutation() {
+    let draft = DraftVersion::default();
+    let before = draft.clone();
+
+    let result = draft.validate_planogram();
+
+    assert_eq!(result.revision, 0);
+    assert!(result.valid);
+    assert!(result.validation.issues.is_empty());
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn whole_plan_validation_collects_structured_issues_across_the_draft() {
+    let mut draft = DraftVersion::default();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+
+    draft.placements[0].product_id = product("missing_product");
+    draft.placements[0].shelf_id = shelf("missing_shelf");
+    draft.placements[1].x = Length::from_sixteenths(1);
+    let shelf_01_elevation = draft.shelf(&shelf("shelf_01")).unwrap().elevation;
+    draft.shelf_mut(&shelf("shelf_02")).unwrap().elevation = shelf_01_elevation;
+    let before = draft.clone();
+
+    let result = draft.validate_planogram();
+
+    assert_eq!(result.revision, 2);
+    assert!(!result.valid);
+    for code in [
+        ValidationCode::MissingProduct,
+        ValidationCode::MissingShelf,
+        ValidationCode::PlacementXIncrement,
+        ValidationCode::DuplicateElevation,
+    ] {
+        assert!(has_issue(&result.validation, code), "missing {code:?}");
+    }
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn valid_move_increments_once_and_returns_patch() {
+    let mut draft = DraftVersion::default();
+    let applied = expect_applied(draft.move_shelf(
+        &draft.id.clone(),
+        &shelf("shelf_02"),
+        Length::from_sixteenths(400),
+        0,
+        "Inspector edit",
+    ));
+    assert_eq!(applied.revision, 1);
+    assert_eq!(applied.scene_patch.revision, 1);
+    assert_eq!(draft.revision, 1);
+    assert_eq!(draft.change_sets.len(), 1);
+    assert_eq!(
+        draft.shelf(&shelf("shelf_02")).unwrap().elevation,
+        Length::from_sixteenths(400)
+    );
+}
+
+#[test]
+fn invalid_moves_are_atomic() {
+    for (id, elevation) in [
+        ("base_deck", 4),
+        ("shelf_02", 192),
+        ("shelf_02", 1_345),
+        ("shelf_02", 0),
+        ("shelf_02", 401),
+    ] {
+        let mut draft = DraftVersion::default();
+        let result = draft.move_shelf(
+            &draft.id.clone(),
+            &shelf(id),
+            Length::from_sixteenths(elevation),
+            0,
+            "Invalid",
+        );
+        assert!(matches!(result, CommandResult::ValidationFailed { .. }));
+        assert_eq!(draft, DraftVersion::default());
+    }
+}
+
+#[test]
+fn shelf_move_validates_derived_vertical_facings_atomically() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let added = draft.apply_placement_changes_as(
+        &version,
+        &[add_change("jif_crunchy_16", "shelf_01", 0, Some((1, 2, 1)))],
+        0,
+        "webmcp",
+        "Stack the display two high",
+    );
+    assert_eq!(expect_applied(added).revision, 1);
+
+    assert_rejected_unchanged(&mut draft, ValidationCode::ProductTooTall, |draft| {
+        draft.move_shelf(
+            &version,
+            &shelf("shelf_02"),
+            Length::from_sixteenths(320),
+            1,
+            "Reduce clearance",
+        )
+    });
+}
+
+#[test]
+fn stale_revision_is_atomic() {
+    let mut draft = DraftVersion::default();
+    let result = draft.move_shelf(
+        &draft.id.clone(),
+        &shelf("shelf_02"),
+        Length::from_sixteenths(400),
+        9,
+        "Stale",
+    );
+    assert!(matches!(
+        result,
+        CommandResult::RevisionConflict {
+            current_revision: 0,
+            ..
+        }
+    ));
+    assert_eq!(draft, DraftVersion::default());
+}
+
+#[test]
+fn undo_walks_backward_through_active_change_sets_and_preserves_history() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let first_id = expect_applied(draft.move_shelf(
+        &version,
+        &shelf("shelf_02"),
+        Length::from_sixteenths(400),
+        0,
+        "Move shelf 02",
+    ))
+    .change_set
+    .id;
+    let second_id = expect_applied(draft.move_shelf(
+        &version,
+        &shelf("shelf_03"),
+        Length::from_sixteenths(384),
+        1,
+        "Move shelf 03 into the old opening",
+    ))
+    .change_set
+    .id;
+    let before = draft.clone();
+
+    let rejected = draft.undo_change_set(&version, &first_id, 2);
+    assert!(matches!(
+        rejected,
+        CommandResult::InvalidCommand { ref message }
+            if message == "Only the latest active change set is eligible for undo."
+    ));
+    assert_eq!(draft, before);
+
+    assert_eq!(
+        expect_applied(draft.undo_change_set(&version, &second_id, 2)).revision,
+        3
+    );
+    assert_eq!(
+        draft.shelf(&shelf("shelf_02")).unwrap().elevation,
+        Length::from_sixteenths(400)
+    );
+    assert_eq!(
+        draft.shelf(&shelf("shelf_03")).unwrap().elevation,
+        Length::from_sixteenths(576)
+    );
+    assert_eq!(draft.latest_undoable_change_set_id(), Some(&first_id));
+
+    assert_eq!(
+        expect_applied(draft.undo_change_set(&version, &first_id, 3)).revision,
+        4
+    );
+    assert_eq!(
+        draft.shelf(&shelf("shelf_02")).unwrap().elevation,
+        Length::from_sixteenths(384)
+    );
+    assert_eq!(draft.change_sets.len(), 4);
+    assert_eq!(draft.change_sets[2].compensates, Some(second_id));
+    assert_eq!(draft.change_sets[3].compensates, Some(first_id));
+    assert_eq!(draft.latest_undoable_change_set_id(), None);
+}
+
+#[test]
+fn product_placement_is_first_fit_revisioned_and_only_latest_active_change_is_undoable() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let first = add(&mut draft, "jif_creamy_16", "shelf_01");
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.scene_patch.placements[0].x, Length::ZERO);
+    let second = add(&mut draft, "skippy_creamy_16", "shelf_01");
+    assert_eq!(second.revision, 2);
+    assert_eq!(draft.placements[1].x, Length::from_sixteenths(178));
+
+    let before_non_latest_undo = draft.clone();
+    let rejected = draft.undo_change_set(&version, &first.change_set.id, 2);
+    assert!(matches!(rejected, CommandResult::InvalidCommand { .. }));
+    assert_eq!(draft, before_non_latest_undo);
+
+    let undo = expect_applied(draft.undo_change_set(&version, &second.change_set.id, 2));
+    assert_eq!(undo.revision, 3);
+    assert_eq!(draft.placements.len(), 1);
+    assert_eq!(draft.placements[0].product_id, product("jif_creamy_16"));
+
+    let blocked_move = draft.move_shelf(
+        &version,
+        &shelf("shelf_02"),
+        Length::inches(15),
+        3,
+        "reduce clearance",
+    );
+    assert!(matches!(
+        blocked_move,
+        CommandResult::ValidationFailed { revision: 3, .. }
+    ));
+    assert_eq!(
+        draft.shelf(&shelf("shelf_02")).unwrap().elevation,
+        Length::inches(24)
+    );
+}
+
+#[test]
+fn direct_add_rejects_the_fixed_base_deck_for_human_and_webmcp() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementOnFixedShelf, |draft| {
+        draft.add_placement(
+            &version,
+            &product("jif_creamy_16"),
+            &shelf("base_deck"),
+            0,
+            "catalog add",
+        )
+    });
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementOnFixedShelf, |draft| {
+        draft.add_placement_as(
+            &version,
+            &product("jif_creamy_16"),
+            &shelf("base_deck"),
+            0,
+            "webmcp",
+            "site-tool add",
+        )
+    });
+}
+
+#[test]
+fn webmcp_add_and_undo_are_explicitly_attributed() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let added = expect_applied(draft.add_placement_as(
+        &version,
+        &product("jif_creamy_16"),
+        &shelf("shelf_01"),
+        0,
+        "webmcp",
+        "Add Jif from the site tool",
+    ));
+    assert_eq!(added.change_set.actor, "webmcp");
+    assert_eq!(added.change_set.reason, "Add Jif from the site tool");
+
+    let undone =
+        expect_applied(draft.undo_change_set_as(&version, &added.change_set.id, 1, "webmcp"));
+    assert_eq!(undone.change_set.actor, "webmcp");
+    assert_eq!(undone.change_set.compensates, Some(added.change_set.id));
+}
+
+#[test]
+fn generic_placement_proposal_previews_applies_atomically_and_undoes_as_one_batch() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let changes = vec![
+        add_change("jif_creamy_16", "shelf_01", 0, None),
+        add_change("jif_creamy_40", "shelf_02", 0, Some((1, 1, 1))),
+    ];
+
+    let preview = draft.preview_placement_changes(&version, &changes, 0);
+    assert!(
+        matches!(preview, PreviewResult::Ready { revision: 0, ref operations, .. } if operations.len() == 2)
+    );
+    assert!(draft.placements.is_empty());
+    assert_eq!(draft.revision, 0);
+    assert!(draft.change_sets.is_empty());
+
+    let applied = expect_applied(draft.apply_placement_changes_as(
+        &version,
+        &changes,
+        0,
+        "webmcp",
+        "Group brands, then place smaller packages higher",
+    ));
+    assert_eq!(applied.revision, 1);
+    assert_eq!(
+        applied.affected_ids,
+        vec!["placement_0001", "placement_0002"]
+    );
+    assert_eq!(applied.scene_patch.placements.len(), 2);
+    assert_eq!(applied.change_set.actor, "webmcp");
+    assert_eq!(applied.change_set.operations.len(), 2);
+    assert_eq!(draft.placements.len(), 2);
+    assert_eq!(draft.revision, 1);
+
+    let stale_preview = draft.preview_placement_changes(&version, &changes, 0);
+    assert!(matches!(
+        stale_preview,
+        PreviewResult::RevisionConflict {
+            current_revision: 1,
+            ..
+        }
+    ));
+
+    let undone =
+        expect_applied(draft.undo_change_set_as(&version, &applied.change_set.id, 1, "webmcp"));
+    assert_eq!(undone.revision, 2);
+    assert_eq!(undone.change_set.actor, "webmcp");
+    assert_eq!(undone.change_set.compensates, Some(applied.change_set.id));
+    assert_eq!(undone.change_set.operations.len(), 2);
+    assert!(draft.placements.is_empty());
+}
+
+#[test]
+fn invalid_generic_placement_proposal_is_atomic() {
+    let draft = DraftVersion::default();
+    let before = draft.clone();
+    let preview = draft.preview_placement_changes(
+        &draft.id,
+        &[
+            add_change("jif_crunchy_16", "shelf_01", 0, Some((1, 1, 1))),
+            add_change("skippy_chunk_16", "shelf_01", 1, Some((100, 1, 1))),
+        ],
+        0,
+    );
+    assert!(matches!(
+        preview,
+        PreviewResult::ValidationFailed { ref validation, revision: 0 }
+            if has_issue(validation, ValidationCode::PlacementOutOfBounds)
+    ));
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn generic_proposal_validates_implicit_reflow_before_preview_or_apply() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    for _ in 0..12 {
+        add(&mut draft, "jif_crunchy_16", "shelf_01");
+    }
+    let before = draft.clone();
+    let overflow = [add_change("jif_crunchy_16", "shelf_01", 0, Some((1, 1, 1)))];
+
+    let preview = draft.preview_placement_changes(&version, &overflow, 12);
+    assert!(matches!(
+        preview,
+        PreviewResult::ValidationFailed { revision: 12, ref validation }
+            if has_issue(validation, ValidationCode::PlacementOutOfBounds)
+    ));
+    assert_eq!(draft, before);
+
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementOutOfBounds, |draft| {
+        draft.apply_placement_changes_as(&version, &overflow, 12, "webmcp", "Overfill the shelf")
+    });
+}
+
+#[test]
+fn generic_sequence_resolves_even_physical_positions_without_model_coordinates() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let applied = draft.apply_placement_changes_as(
+        &version,
+        &[
+            add_change("jif_crunchy_16", "shelf_01", 1, Some((1, 1, 1))),
+            add_change("skippy_chunk_16", "shelf_01", 0, Some((1, 1, 1))),
+        ],
+        0,
+        "webmcp",
+        "Order the brand block",
+    );
+    assert_eq!(expect_applied(applied).revision, 1);
+    let x_of = |product_id: &str| {
+        draft
+            .placements
+            .iter()
+            .find(|placement| placement.product_id == product(product_id))
+            .unwrap()
+            .x
+    };
+    assert_eq!(x_of("skippy_chunk_16"), Length::ZERO);
+    assert_eq!(x_of("jif_crunchy_16"), Length::from_sixteenths(62));
+}
+
+#[test]
+fn generic_add_reflows_existing_items_and_batch_undo_restores_their_exact_positions() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let existing = draft.placements[0].clone();
+    let applied = expect_applied(draft.apply_placement_changes_as(
+        &version,
+        &[add_change("skippy_creamy_16", "shelf_01", 0, None)],
+        1,
+        "webmcp",
+        "Prepend the next brand block",
+    ));
+    assert_eq!(applied.change_set.operations.len(), 2);
+    assert_eq!(
+        draft.placement(&existing.id).unwrap().x,
+        Length::from_sixteenths(184)
+    );
+
+    let undone =
+        expect_applied(draft.undo_change_set_as(&version, &applied.change_set.id, 2, "webmcp"));
+    assert_eq!(undone.revision, 3);
+    assert_eq!(draft.placements, vec![existing]);
+}
+
+#[test]
+fn placement_removal_is_revisioned_atomic_and_exactly_undoable() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let original = draft.placements[0].clone();
+
+    let before = draft.clone();
+    let stale = draft.remove_placement(&version, &original.id, 0, "stale remove");
+    assert!(matches!(stale, CommandResult::RevisionConflict { .. }));
+    assert_eq!(draft, before);
+
+    let removed =
+        expect_applied(draft.remove_placement(&version, &original.id, 1, "inspector remove"));
+    assert_eq!(removed.revision, 2);
+    assert_eq!(
+        removed.scene_patch.removed_placement_ids,
+        vec![original.id.clone()]
+    );
+    assert!(draft.placements.is_empty());
+
+    let undone = expect_applied(draft.undo_change_set(&version, &removed.change_set.id, 2));
+    assert_eq!(undone.revision, 3);
+    assert_eq!(draft.placements, vec![original]);
+}
+
+#[test]
+fn placement_move_uses_eighth_inch_grid_records_one_operation_and_undoes_exactly() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let original = draft.placements[0].clone();
+
+    let moved = expect_applied(draft.move_placement(
+        &version,
+        &original.id,
+        &shelf("shelf_02"),
+        Length::from_sixteenths(2),
+        1,
+        "Inspector move",
+    ));
+    assert_eq!(moved.revision, 2);
+    assert_eq!(moved.scene_patch.placements.len(), 1);
+    assert_eq!(moved.scene_patch.placements[0].shelf_id, shelf("shelf_02"));
+    assert_eq!(
+        moved.scene_patch.placements[0].x,
+        Length::from_sixteenths(2)
+    );
+    assert_eq!(moved.change_set.operations.len(), 1);
+    match &moved.change_set.operations[0] {
+        PlanogramOperation::MovePlacement(operation) => {
+            assert_eq!(operation.placement_id, original.id);
+            assert_eq!(operation.before.shelf_id, shelf("shelf_01"));
+            assert_eq!(operation.after.shelf_id, shelf("shelf_02"));
+            assert_eq!(operation.before.x, Length::ZERO);
+            assert_eq!(operation.after.x, Length::from_sixteenths(2));
+        }
+        operation => panic!("unexpected operation: {operation:?}"),
+    }
+    assert_eq!(draft.revision, 2);
+    assert_eq!(draft.change_sets.len(), 2);
+    assert_eq!(draft.placements[0].shelf_id, shelf("shelf_02"));
+    assert_eq!(draft.placements[0].x, Length::from_sixteenths(2));
+
+    let undone = expect_applied(draft.undo_change_set(&version, &moved.change_set.id, 2));
+    assert_eq!(undone.revision, 3);
+    assert_eq!(draft.placements[0].shelf_id, original.shelf_id);
+    assert_eq!(draft.placements[0].x, original.x);
+    assert_eq!(draft.change_sets.len(), 3);
+    assert_eq!(draft.change_sets[2].compensates, Some(moved.change_set.id));
+}
+
+#[test]
+fn invalid_placement_moves_are_atomic_for_increment_and_shelf_bounds() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let placement_id = draft.placements[0].id.clone();
+
+    for (target_shelf, target_x, code) in [
+        ("shelf_01", 1, ValidationCode::PlacementXIncrement),
+        ("shelf_01", 712, ValidationCode::PlacementOutOfBounds),
+        ("base_deck", 0, ValidationCode::PlacementOnFixedShelf),
+    ] {
+        assert_rejected_unchanged(&mut draft, code, |draft| {
+            draft.move_placement(
+                &version,
+                &placement_id,
+                &shelf(target_shelf),
+                Length::from_sixteenths(target_x),
+                1,
+                "Invalid move",
+            )
+        });
+    }
+}
+
+#[test]
+fn invalid_placement_moves_block_overlap_and_minimum_gap() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    add(&mut draft, "skippy_creamy_16", "shelf_01");
+    let second_id = draft.placements[1].id.clone();
+
+    for (target_x, code) in [
+        (0, ValidationCode::PlacementOverlap),
+        (176, ValidationCode::PlacementGap),
+    ] {
+        assert_rejected_unchanged(&mut draft, code, |draft| {
+            draft.move_placement(
+                &version,
+                &second_id,
+                &shelf("shelf_01"),
+                Length::from_sixteenths(target_x),
+                2,
+                "Invalid move",
+            )
+        });
+    }
+}
+
+#[test]
+fn invalid_placement_moves_block_shallow_shelves() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    draft.shelf_mut(&shelf("shelf_02")).unwrap().depth = Length::from_sixteenths(56);
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let placement_id = draft.placements[0].id.clone();
+
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementTooDeep, |draft| {
+        draft.move_placement(
+            &version,
+            &placement_id,
+            &shelf("shelf_02"),
+            Length::ZERO,
+            1,
+            "depth",
+        )
+    });
+}
+
+#[test]
+fn invalid_placement_moves_block_insufficient_clearance() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    draft.shelf_mut(&shelf("shelf_02")).unwrap().elevation = Length::from_sixteenths(500);
+    draft.shelf_mut(&shelf("shelf_03")).unwrap().elevation = Length::from_sixteenths(550);
+    add(&mut draft, "jif_creamy_40", "shelf_01");
+    let placement_id = draft.placements[0].id.clone();
+
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementTooTall, |draft| {
+        draft.move_placement(
+            &version,
+            &placement_id,
+            &shelf("shelf_02"),
+            Length::ZERO,
+            1,
+            "clearance",
+        )
+    });
+}
+
+#[test]
+fn placement_move_rejects_stale_and_published_commands_without_mutation() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let placement_id = draft.placements[0].id.clone();
+    let move_to_shelf_02 = |draft: &mut DraftVersion, expected_revision| {
+        draft.move_placement(
+            &version,
+            &placement_id,
+            &shelf("shelf_02"),
+            Length::from_sixteenths(2),
+            expected_revision,
+            "rejected move",
+        )
+    };
+
+    let before = draft.clone();
+    let stale = move_to_shelf_02(&mut draft, 0);
+    assert!(matches!(stale, CommandResult::RevisionConflict { .. }));
+    assert_eq!(draft, before);
+
+    draft.status = VersionStatus::Published;
+    let before = draft.clone();
+    let forbidden = move_to_shelf_02(&mut draft, 1);
+    assert!(matches!(forbidden, CommandResult::Forbidden { .. }));
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn placement_move_rejects_missing_version_placement_shelf_and_product_ids() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let not_found = |result: CommandResult| match result {
+        CommandResult::NotFound { entity, .. } => entity,
+        result => panic!("expected not found, got {result:?}"),
+    };
+
+    let missing = PlacementId::new("missing");
+    assert_eq!(
+        not_found(draft.move_placement(
+            &version,
+            &missing,
+            &shelf("shelf_01"),
+            Length::ZERO,
+            0,
+            "missing placement"
+        )),
+        "placement"
+    );
+    assert_eq!(
+        not_found(draft.move_placement(
+            &VersionId::new("wrong"),
+            &missing,
+            &shelf("shelf_01"),
+            Length::ZERO,
+            0,
+            "wrong version",
+        )),
+        "version"
+    );
+
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let placement = draft.placements[0].clone();
+    assert_eq!(
+        not_found(draft.move_placement(
+            &version,
+            &placement.id,
+            &shelf("missing"),
+            Length::ZERO,
+            1,
+            "missing shelf"
+        )),
+        "shelf"
+    );
+
+    draft
+        .products
+        .retain(|product| product.id != placement.product_id);
+    assert_eq!(
+        not_found(draft.move_placement(
+            &version,
+            &placement.id,
+            &shelf("shelf_02"),
+            Length::ZERO,
+            1,
+            "missing product"
+        )),
+        "product"
+    );
+    assert_eq!(draft.revision, 1);
+    assert_eq!(draft.change_sets.len(), 1);
+}
+
+#[test]
+fn missing_placement_removal_does_not_mutate_state() {
+    let mut draft = DraftVersion::default();
+    let before = draft.clone();
+    let result = draft.remove_placement(
+        &draft.id.clone(),
+        &PlacementId::new("missing"),
+        0,
+        "remove missing",
+    );
+    assert!(matches!(
+        result,
+        CommandResult::NotFound { ref entity, .. } if entity == "placement"
+    ));
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn undo_restores_legacy_odd_position_without_rounding() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_crunchy_16", "shelf_01");
+    add(&mut draft, "skippy_chunk_16", "shelf_01");
+    draft.placements[1].x = Length::from_sixteenths(59);
+    let removed_id = draft.placements[1].id.clone();
+    let removed = expect_applied(draft.remove_placement(&version, &removed_id, 2, "remove"));
+
+    let undone = expect_applied(draft.undo_change_set(&version, &removed.change_set.id, 3));
+    assert_eq!(undone.revision, 4);
+    assert_eq!(
+        draft.placement(&removed_id).unwrap().x,
+        Length::from_sixteenths(59)
+    );
+}
+
+#[test]
+fn shelf_distribution_is_atomic_grid_aligned_balanced_and_undoable() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    for product_id in ["jif_creamy_16", "skippy_creamy_16", "peter_pan_creamy_16"] {
+        add(&mut draft, product_id, "shelf_01");
+    }
+    let before = draft.placements.clone();
+    let applied = expect_applied(draft.distribute_shelf(
+        &version,
+        &shelf("shelf_01"),
+        ShelfDistribution::SpaceEvenly,
+        3,
+        "inspector space evenly",
+    ));
+    assert_eq!(applied.revision, 4);
+    assert_eq!(applied.change_set.operations.len(), 3);
+    assert_eq!(applied.scene_patch.placements.len(), 3);
+
+    let mut ordered = shelf_views(&draft, "shelf_01");
+    ordered.sort_by_key(|view| view.x);
+    assert_eq!(
+        ordered.iter().map(|view| &view.id).collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|placement| &placement.id)
+            .collect::<Vec<_>>()
+    );
+    assert!(ordered.iter().all(|view| view.x.sixteenths() % 2 == 0));
+    for pair in ordered.windows(2) {
+        assert!(pair[1].x - (pair[0].x + pair[0].geometry.display_width) >= MIN_PLACEMENT_GAP);
+    }
+    let last = ordered.last().unwrap();
+    let left_margin = ordered[0].x.sixteenths();
+    let right_margin = (draft.shelf(&shelf("shelf_01")).unwrap().width
+        - (last.x + last.geometry.display_width))
+        .sixteenths();
+    assert!((left_margin - right_margin).abs() <= 3);
+
+    let undone = expect_applied(draft.undo_change_set(&version, &applied.change_set.id, 4));
+    assert_eq!(undone.revision, 5);
+    assert_eq!(draft.placements, before);
+}
+
+#[test]
+fn fill_evenly_allocates_facings_in_rust_previews_applies_and_undoes_atomically() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let additions = ["jif_creamy_40", "jif_crunchy_40", "jif_natural_40"]
+        .into_iter()
+        .zip(0..)
+        .map(|(product_id, sequence)| add_change(product_id, "shelf_01", sequence, None))
+        .collect::<Vec<_>>();
+    let added = draft.apply_placement_changes(&version, &additions, 0, "largest Jif assortment");
+    assert_eq!(expect_applied(added).revision, 1);
+    let before = draft.placements.clone();
+
+    match draft.preview_shelf_allocation(
+        &version,
+        &shelf("shelf_01"),
+        ShelfAllocationStrategy::FillEvenly,
+        1,
+    ) {
+        PreviewResult::Ready {
+            revision,
+            operations,
+            preview_scene,
+            ref validation,
+            ..
+        } => {
+            assert_eq!(revision, 1);
+            assert!(validation.valid());
+            assert_eq!(operations.len(), 3);
+            assert!(operations
+                .iter()
+                .all(|operation| matches!(operation, PlanogramOperation::ReflowPlacement(_))));
+            let proposed = preview_scene
+                .placements
+                .iter()
+                .filter(|placement| placement.shelf_id == shelf("shelf_01"))
+                .map(|placement| (placement.facings_x, placement.x.sixteenths()))
+                .collect::<Vec<_>>();
+            assert_eq!(proposed, vec![(4, 4), (4, 282), (3, 560)]);
+        }
+        result => panic!("unexpected preview: {result:?}"),
+    }
+    assert_eq!(draft.revision, 1);
+    assert_eq!(draft.placements, before);
+
+    let applied = expect_applied(draft.apply_shelf_allocation_as(
+        &version,
+        &shelf("shelf_01"),
+        ShelfAllocationStrategy::FillEvenly,
+        1,
+        "webmcp",
+        "Fill the bottom shelf evenly with facings",
+    ));
+    assert_eq!(applied.revision, 2);
+    assert_eq!(applied.change_set.actor, "webmcp");
+    assert_eq!(applied.change_set.operations.len(), 3);
+    assert_eq!(applied.scene_patch.placements.len(), 3);
+
+    let allocated = shelf_views(&draft, "shelf_01");
+    assert_eq!(
+        allocated
+            .iter()
+            .map(|view| view.facings_x)
+            .collect::<Vec<_>>(),
+        vec![4, 4, 3]
+    );
+    let occupied = allocated
+        .iter()
+        .map(|view| view.geometry.display_width.sixteenths())
+        .sum::<i32>()
+        + MIN_PLACEMENT_GAP.sixteenths() * 2;
+    assert_eq!(occupied, 752);
+    assert!(DEFAULT_FIXTURE_WIDTH.sixteenths() - occupied < 68);
+
+    let undone = expect_applied(draft.undo_change_set(&version, &applied.change_set.id, 2));
+    assert_eq!(undone.revision, 3);
+    assert_eq!(draft.placements, before);
+}
+
+#[test]
+fn distribution_modes_resolve_deterministically_on_the_eighth_inch_grid() {
+    let widths = [
+        Length::from_sixteenths(57),
+        Length::from_sixteenths(60),
+        Length::from_sixteenths(55),
+    ];
+    let shelf_width = Length::from_sixteenths(768);
+    for distribution in [
+        ShelfDistribution::PackedLeft,
+        ShelfDistribution::Centered,
+        ShelfDistribution::SpaceBetween,
+        ShelfDistribution::SpaceEvenly,
+    ] {
+        let first = resolve_shelf_distribution(&widths, shelf_width, distribution).unwrap();
+        let second = resolve_shelf_distribution(&widths, shelf_width, distribution).unwrap();
+        assert_eq!(first, second);
+        assert!(first.iter().all(|position| position.sixteenths() % 2 == 0));
+        for index in 1..first.len() {
+            assert!(first[index] - (first[index - 1] + widths[index - 1]) >= MIN_PLACEMENT_GAP);
+        }
+        assert!(*first.last().unwrap() + widths[widths.len() - 1] <= shelf_width);
+    }
+}
+
+#[test]
+fn duplicate_placement_targets_are_rejected_atomically() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let placement_id = draft.placements[0].id.clone();
+    let before = draft.clone();
+    let result = draft.preview_placement_changes(
+        &version,
+        &[
+            PlacementChange::Move {
+                placement_id: placement_id.clone(),
+                shelf_id: shelf("shelf_02"),
+                sequence: 0,
+                resolved_x: None,
+            },
+            PlacementChange::Remove { placement_id },
+        ],
+        1,
+    );
+    assert!(matches!(
+        result,
+        PreviewResult::InvalidCommand { ref message }
+            if message.contains("may only appear once")
+    ));
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn catalog_has_complete_fixed_point_metrics_and_exact_five_loaded_trays() {
+    let draft = DraftVersion::default();
+    let products = &draft.products;
+    assert_eq!(products.len(), 22);
+    assert!(draft.validate_planogram().valid);
+    assert!(products.iter().all(|product| {
+        product.dimensions.depth > Length::ZERO
+            && product.net_weight_ounces_hundredths > 0
+            && product.casepack_quantity > 0
+            && product.performance.sales_per_store_per_week_cents > 0
+            && product.performance.units_per_store_per_week_milliunits > 0
+            && product.performance.gross_margin_basis_points > 0
+            && product.performance.source == PERFORMANCE_SOURCE
+            && product.performance.period == PERFORMANCE_PERIOD
+    }));
+    assert_eq!(
+        products
+            .iter()
+            .map(|product| (
+                product.id.0.as_str(),
+                product.net_weight_ounces_hundredths,
+                product.performance.sales_per_store_per_week_cents,
+                product.performance.units_per_store_per_week_milliunits,
+                product.performance.gross_margin_basis_points,
+                product.casepack_quantity,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("jif_creamy_16", 1_600, 3_665, 10_500, 2_850, 12),
+            ("jif_crunchy_16", 1_600, 2_024, 5_800, 2_875, 12),
+            ("jif_natural_16", 1_600, 1_716, 4_300, 3_100, 12),
+            ("jif_creamy_40", 4_000, 3_895, 5_200, 2_550, 6),
+            ("jif_crunchy_40", 4_000, 1_947, 2_600, 2_575, 6),
+            ("jif_natural_40", 4_000, 1_678, 2_100, 2_800, 6),
+            ("skippy_creamy_16", 1_630, 2_928, 8_900, 2_900, 12),
+            ("skippy_chunk_16", 1_630, 1_546, 4_700, 2_925, 12),
+            ("skippy_natural_16", 1_500, 1_364, 3_600, 3_150, 12),
+            ("skippy_creamy_40", 4_000, 3_076, 4_400, 2_600, 6),
+            ("skippy_chunk_40", 4_000, 1_538, 2_200, 2_625, 6),
+            ("skippy_natural_40", 4_000, 1_348, 1_800, 2_850, 6),
+            ("peter_pan_creamy_16", 1_630, 1_914, 6_400, 2_750, 12),
+            ("peter_pan_crunchy_16", 1_630, 927, 3_100, 2_775, 12),
+            ("peter_pan_creamy_40", 4_000, 1_947, 3_000, 2_500, 6),
+            ("peter_pan_crunchy_40", 4_000, 909, 1_400, 2_525, 6),
+            ("smuckers_natural_16", 1_600, 1_572, 3_500, 3_300, 12),
+            ("smuckers_chunky_16", 1_600, 808, 1_800, 3_325, 12),
+            ("smuckers_natural_26", 2_600, 1_298, 2_000, 3_100, 6),
+            ("smuckers_chunky_26", 2_600, 649, 1_000, 3_125, 6),
+            ("justins_classic_16", 1_600, 1_118, 1_600, 3_600, 6),
+            ("justins_classic_28", 2_800, 879, 800, 3_400, 6),
+        ]
+    );
+    assert_eq!(
+        products
+            .iter()
+            .filter_map(|product| {
+                let tray = product.tray.as_ref()?;
+                Some((
+                    product.id.0.as_str(),
+                    tray.facings_x,
+                    tray.units_deep,
+                    tray.outer_width.sixteenths(),
+                    tray.outer_height.sixteenths(),
+                    tray.outer_depth.sixteenths(),
+                    tray.front_lip_height.sixteenths(),
+                ))
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("jif_creamy_16", 3, 4, 175, 80, 232, 20),
+            ("skippy_creamy_16", 3, 4, 181, 78, 240, 20),
+            ("peter_pan_creamy_16", 3, 4, 178, 78, 236, 20),
+            ("smuckers_natural_16", 2, 3, 116, 84, 172, 20),
+            ("justins_classic_16", 2, 3, 116, 86, 172, 20),
+        ]
+    );
+}
+
+#[test]
+fn tray_direct_add_uses_one_loaded_footprint_everywhere() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let added = add(&mut draft, "jif_creamy_16", "shelf_01");
+    assert_eq!(added.revision, 1);
+    let node = &added.scene_patch.placements[0];
+    assert_eq!(node.width, Length::from_sixteenths(175));
+    assert_eq!(node.height, Length::from_sixteenths(80));
+    assert_eq!(node.required_depth, Length::from_sixteenths(232));
+    assert_eq!(node.stocking_mode, StockingMode::Tray);
+    assert_eq!(node.stocked_unit_count, 12);
+    assert_eq!((node.facings_x, node.facings_y, node.facings_z), (3, 1, 4));
+
+    let placement_id = draft.placements[0].id.clone();
+    let view = draft.placement_view(&placement_id).unwrap();
+    assert_eq!(view.id, placement_id);
+    assert_eq!(view.product_id, product("jif_creamy_16"));
+    assert_eq!(view.stocking_mode, StockingMode::Tray);
+    assert_eq!(view.stocked_unit_count, 12);
+    assert_eq!(view.geometry.display_width, Length::from_sixteenths(175));
+
+    draft.shelf_mut(&shelf("shelf_02")).unwrap().depth = Length::from_sixteenths(230);
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementTooDeep, |draft| {
+        draft.move_placement(
+            &version,
+            &placement_id,
+            &shelf("shelf_02"),
+            Length::ZERO,
+            1,
+            "tray depth overflow",
+        )
+    });
+
+    let undone = expect_applied(draft.undo_change_set(&version, &added.change_set.id, 1));
+    assert_eq!(undone.revision, 2);
+    assert!(draft.placements.is_empty());
+}
+
+#[test]
+fn tray_proposals_resolve_omitted_facings_and_reject_explicit_conflicts_atomically() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let conflicting = [add_change("jif_creamy_16", "shelf_01", 0, Some((1, 1, 1)))];
+    assert_rejected_unchanged(&mut draft, ValidationCode::TrayFacingMismatch, |draft| {
+        draft.apply_placement_changes(&version, &conflicting, 0, "conflicting tray facings")
+    });
+
+    let omitted = [add_change("jif_creamy_16", "shelf_01", 0, None)];
+    assert!(matches!(
+        draft.preview_placement_changes(&version, &omitted, 0),
+        PreviewResult::Ready { revision: 0, .. }
+    ));
+    let applied = draft.apply_placement_changes(&version, &omitted, 0, "stock tray");
+    assert_eq!(expect_applied(applied).revision, 1);
+    let placement = &draft.placements[0];
+    assert_eq!(
+        (
+            placement.facings_x,
+            placement.facings_y,
+            placement.facings_z
+        ),
+        (3, 1, 4)
+    );
+}
+
+#[test]
+fn catalog_includes_near_eight_inch_family_size_variants_for_every_brand() {
+    let products = default_products();
+    let tall = products
+        .iter()
+        .filter(|product| product.dimensions.confidence == "concept")
+        .collect::<Vec<_>>();
+    assert_eq!(tall.len(), 11);
+    assert!(tall.iter().all(|product| {
+        (Length::from_sixteenths(120)..=Length::inches(8)).contains(&product.dimensions.height)
+    }));
+    for brand in ["Jif", "SKIPPY", "Peter Pan", "Smucker's", "Justin's"] {
+        assert!(tall.iter().any(|product| product.brand == brand));
+    }
+}
+
+#[test]
+fn catalog_uses_one_color_per_brand() {
+    let products = default_products();
+    for brand in ["Jif", "SKIPPY", "Peter Pan", "Smucker's", "Justin's"] {
+        let brand_colors = products
+            .iter()
+            .filter(|product| product.brand == brand)
+            .map(|product| product.color)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(brand_colors.len(), 1, "{brand} should have one brand color");
+    }
+}

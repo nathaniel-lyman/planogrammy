@@ -107,8 +107,13 @@ A keyboard user must be able to select an adjustable shelf, move it, edit its el
 - Keep transport fields explicit, including `_sixteenths` where the representation crosses a boundary.
 - Keep non-geometric fixed-point units explicit in names too: `_cents`, `_milliunits`, `_basis_points`, and `_ounces_hundredths`.
 - Preserve unrelated user changes and generated-artifact ignore rules.
-- Use `apply_patch` for source edits.
 - Do not commit generated Wasm bindings, `dist`, `target`, Playwright results, or TypeScript build info.
+
+## Test conventions
+
+- Rust domain tests live in `crates/planogram-core/src/tests.rs`. Use its helpers: `add` (checked setup add at the current revision), `add_change`, `expect_applied`, and `assert_rejected_unchanged` (asserts the validation code and that geometry, revision, and history are unchanged).
+- Vitest data and canned Wasm results come from `apps/web/src/testFixtures.ts`. TypeScript tests check transport and routing only; they must not re-derive Rust geometry.
+- Browser tests use the helpers at the top of `apps/web/tests/browser/editor.spec.ts` (`openEditor`, `openEditorWithSiteTools`, `callSiteTool`, `expectRevision`, `skipUnlessRevision`). Scope text assertions to a panel when the same value can appear in the canvas outline, inspector, and companion.
 
 ## Commands
 
@@ -122,6 +127,7 @@ npm run typecheck
 npm test
 npm run build
 npm --workspace apps/web run test:browser
+npm --workspace apps/web run test:browser -- --headed   # real WebGPU; headless skips render-backed flows
 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -137,8 +143,8 @@ Before declaring an editor change complete:
 1. Run Rust formatting, Clippy, and native tests.
 2. Build the actual Wasm artifact.
 3. Run TypeScript checking, frontend tests, and the production build.
-4. Run browser tests. The headless command-flow test may skip when headless Chromium cannot execute render-backed WebGPU commands; do not present a skip as interaction proof.
-5. Open the app at `http://127.0.0.1:4173` in the Codex in-app browser and exercise the affected behavior with real WebGPU.
+4. Run browser tests headed so render-backed flows execute with real WebGPU. Headless Chromium skips those flows; do not present a skip as interaction proof.
+5. Open the app at `http://127.0.0.1:4173` in an in-app browser with real WebGPU and exercise the affected behavior. Test-only changes may rely on the headed browser run instead.
 6. Inspect the visible fixture, companion state, revision changes, validation messages, focus behavior, and browser console.
 7. Distinguish automated checks, live browser proof, and any WebGPU behavior that could not be verified.
 
