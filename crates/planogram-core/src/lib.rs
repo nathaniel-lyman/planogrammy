@@ -254,6 +254,40 @@ pub struct Placement {
     pub facings_z: u32,
 }
 
+impl Placement {
+    pub fn facings(&self) -> PlacementFacings {
+        PlacementFacings {
+            facings_x: self.facings_x,
+            facings_y: self.facings_y,
+            facings_z: self.facings_z,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlacementFacings {
+    pub facings_x: u32,
+    pub facings_y: u32,
+    pub facings_z: u32,
+}
+
+impl PlacementFacings {
+    fn in_range(&self) -> bool {
+        [self.facings_x, self.facings_y, self.facings_z]
+            .iter()
+            .all(|count| (1..=100).contains(count))
+    }
+}
+
+/// A requested facing change. Omitted counts keep the placement's current
+/// value; Rust resolves them so callers never restate existing geometry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FacingsRequest {
+    pub facings_x: Option<u32>,
+    pub facings_y: Option<u32>,
+    pub facings_z: Option<u32>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StockingMode {
@@ -344,6 +378,12 @@ pub enum PlacementChange {
         facings_y: u32,
         facings_z: u32,
     },
+    /// Changes facing counts in place. The left edge stays fixed; any
+    /// neighbor pushes are separate exact `Move` changes in the same proposal.
+    SetFacings {
+        placement_id: PlacementId,
+        facings: PlacementFacings,
+    },
     Remove {
         placement_id: PlacementId,
     },
@@ -367,11 +407,19 @@ pub struct ReflowPlacement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChangeFacings {
+    pub placement_id: PlacementId,
+    pub before: PlacementFacings,
+    pub after: PlacementFacings,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlanogramOperation {
     MoveShelf(MoveShelf),
     MovePlacement(MovePlacement),
     ReflowPlacement(ReflowPlacement),
+    ChangeFacings(ChangeFacings),
     AddPlacement(AddPlacement),
     RemovePlacement(RemovePlacement),
 }
@@ -568,6 +616,10 @@ enum RequestedPlacementOperation {
     Reflow {
         placement_id: PlacementId,
         before: PlacementConfiguration,
+    },
+    SetFacings {
+        placement_id: PlacementId,
+        before: PlacementFacings,
     },
     Remove(Placement),
 }
@@ -1788,6 +1840,206 @@ impl DraftVersion {
         Ok(changes)
     }
 
+    pub fn set_facings(
+        &mut self,
+        version_id: &VersionId,
+        placement_id: &PlacementId,
+        request: FacingsRequest,
+        expected_revision: u64,
+        reason: impl Into<String>,
+    ) -> CommandResult {
+        self.set_facings_as(
+            version_id,
+            placement_id,
+            request,
+            expected_revision,
+            "human",
+            reason,
+        )
+    }
+
+    /// Changes one placement's facing counts. The placement keeps its left
+    /// edge; when it widens, following placements on the same shelf shift
+    /// right only as far as the minimum gap requires. The facing change and
+    /// every resulting shift commit as one change set or not at all.
+    pub fn set_facings_as(
+        &mut self,
+        version_id: &VersionId,
+        placement_id: &PlacementId,
+        request: FacingsRequest,
+        expected_revision: u64,
+        actor: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> CommandResult {
+        if version_id != &self.id {
+            return CommandResult::NotFound {
+                entity: "version".into(),
+                id: version_id.0.clone(),
+            };
+        }
+        if expected_revision != self.revision {
+            return CommandResult::RevisionConflict {
+                expected_revision,
+                current_revision: self.revision,
+            };
+        }
+        if !self.status.is_editable() {
+            return CommandResult::Forbidden {
+                message: "This version is not editable.".into(),
+            };
+        }
+        let changes = match self.resolve_set_facings(placement_id, request) {
+            Ok(changes) => changes,
+            Err(result) => return result,
+        };
+        self.apply_placement_changes_with_compensation(
+            version_id,
+            &changes,
+            expected_revision,
+            actor.into(),
+            reason.into(),
+            None,
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn resolve_set_facings(
+        &self,
+        placement_id: &PlacementId,
+        request: FacingsRequest,
+    ) -> Result<Vec<PlacementChange>, CommandResult> {
+        let Some(placement) = self.placement(placement_id) else {
+            return Err(CommandResult::NotFound {
+                entity: "placement".into(),
+                id: placement_id.0.clone(),
+            });
+        };
+        let Some(product) = self.product(&placement.product_id) else {
+            return Err(CommandResult::NotFound {
+                entity: "product".into(),
+                id: placement.product_id.0.clone(),
+            });
+        };
+        let Some(shelf) = self.shelf(&placement.shelf_id) else {
+            return Err(CommandResult::NotFound {
+                entity: "shelf".into(),
+                id: placement.shelf_id.0.clone(),
+            });
+        };
+        if request == FacingsRequest::default() {
+            return Err(CommandResult::InvalidCommand {
+                message: "A facing change must specify at least one facing count.".into(),
+            });
+        }
+        let before = placement.facings();
+        let after = PlacementFacings {
+            facings_x: request.facings_x.unwrap_or(before.facings_x),
+            facings_y: request.facings_y.unwrap_or(before.facings_y),
+            facings_z: request.facings_z.unwrap_or(before.facings_z),
+        };
+        if !after.in_range() {
+            return Err(self.invalid_facing_count(&shelf.id));
+        }
+        if let Some(tray) = &product.tray {
+            let preset = PlacementFacings {
+                facings_x: tray.facings_x,
+                facings_y: 1,
+                facings_z: tray.units_deep,
+            };
+            if after != preset {
+                return Err(self.rejected(
+                    ValidationCode::TrayFacingMismatch,
+                    &shelf.id,
+                    format!(
+                        "{} is a shelf-ready tray; its facings stay at the {} × 1 × {} preset.",
+                        product.description, tray.facings_x, tray.units_deep
+                    ),
+                ));
+            }
+        }
+        if after == before {
+            return Err(CommandResult::InvalidCommand {
+                message: format!(
+                    "Placement {} already uses the requested facings.",
+                    placement_id.0
+                ),
+            });
+        }
+
+        let resized = Placement {
+            facings_x: after.facings_x,
+            facings_y: after.facings_y,
+            facings_z: after.facings_z,
+            ..placement.clone()
+        };
+        let mut following = self
+            .placements
+            .iter()
+            .filter(|other| {
+                other.shelf_id == placement.shelf_id
+                    && (other.x, &other.id) > (placement.x, &placement.id)
+            })
+            .collect::<Vec<_>>();
+        following.sort_by(|left, right| left.x.cmp(&right.x).then_with(|| left.id.cmp(&right.id)));
+
+        let mut changes = vec![PlacementChange::SetFacings {
+            placement_id: placement_id.clone(),
+            facings: after,
+        }];
+        let mut end = resized.x + Self::display_width(&resized, product);
+        for other in following {
+            let earliest = align_to_eighth(end + MIN_PLACEMENT_GAP);
+            if other.x >= earliest {
+                break;
+            }
+            let Some(other_product) = self.product(&other.product_id) else {
+                return Err(CommandResult::NotFound {
+                    entity: "product".into(),
+                    id: other.product_id.0.clone(),
+                });
+            };
+            changes.push(PlacementChange::Move {
+                placement_id: other.id.clone(),
+                shelf_id: other.shelf_id.clone(),
+                sequence: 0,
+                resolved_x: Some(earliest),
+            });
+            end = earliest + Self::display_width(other, other_product);
+        }
+        if end > shelf.width {
+            return Err(self.rejected(
+                ValidationCode::NoShelfCapacity,
+                &shelf.id,
+                format!(
+                    "{} horizontal facings of {} would push products past the shelf's right edge.",
+                    after.facings_x, product.description
+                ),
+            ));
+        }
+        Ok(changes)
+    }
+
+    fn rejected(&self, code: ValidationCode, shelf_id: &ShelfId, message: String) -> CommandResult {
+        CommandResult::ValidationFailed {
+            revision: self.revision,
+            validation: ValidationSummary {
+                issues: vec![ValidationIssue {
+                    code,
+                    shelf_id: Some(shelf_id.clone()),
+                    message,
+                }],
+            },
+        }
+    }
+
+    fn invalid_facing_count(&self, shelf_id: &ShelfId) -> CommandResult {
+        self.rejected(
+            ValidationCode::InvalidFacingCount,
+            shelf_id,
+            "A placement must have between 1 and 100 facings in every dimension.".into(),
+        )
+    }
+
     pub fn preview_placement_changes(
         &self,
         version_id: &VersionId,
@@ -1929,7 +2181,9 @@ impl DraftVersion {
             PlacementChange::Add { resolved_x, .. } | PlacementChange::Move { resolved_x, .. } => {
                 resolved_x.is_some()
             }
-            PlacementChange::Reflow { .. } | PlacementChange::Remove { .. } => true,
+            PlacementChange::Reflow { .. }
+            | PlacementChange::SetFacings { .. }
+            | PlacementChange::Remove { .. } => true,
         });
 
         for change in changes {
@@ -2094,23 +2348,13 @@ impl DraftVersion {
                             id: shelf_id.0.clone(),
                         });
                     };
-                    if *facings_x == 0
-                        || *facings_y == 0
-                        || *facings_z == 0
-                        || *facings_x > 100
-                        || *facings_y > 100
-                        || *facings_z > 100
-                    {
-                        return Err(CommandResult::ValidationFailed {
-                            revision: self.revision,
-                            validation: ValidationSummary {
-                                issues: vec![ValidationIssue {
-                                    code: ValidationCode::InvalidFacingCount,
-                                    shelf_id: Some(shelf_id.clone()),
-                                    message: "A placement must have between 1 and 100 facings in every dimension.".into(),
-                                }],
-                            },
-                        });
+                    let requested_facings = PlacementFacings {
+                        facings_x: *facings_x,
+                        facings_y: *facings_y,
+                        facings_z: *facings_z,
+                    };
+                    if !requested_facings.in_range() {
+                        return Err(self.invalid_facing_count(shelf_id));
                     }
                     let before = PlacementConfiguration {
                         shelf_id: placement.shelf_id.clone(),
@@ -2141,6 +2385,41 @@ impl DraftVersion {
                     );
                     push_unique(&mut touched_shelves, placement.shelf_id);
                     push_unique(&mut touched_shelves, target_shelf.id);
+                    push_unique(&mut affected_ids, placement_id.0.clone());
+                }
+                PlacementChange::SetFacings {
+                    placement_id,
+                    facings,
+                } => {
+                    if seen_placement_ids.iter().any(|id| id == placement_id) {
+                        return Err(CommandResult::InvalidCommand {
+                            message: format!(
+                                "Placement {} may only appear once in a proposal.",
+                                placement_id.0
+                            ),
+                        });
+                    }
+                    let Some(placement) = candidate.placement(placement_id).cloned() else {
+                        return Err(CommandResult::NotFound {
+                            entity: "placement".into(),
+                            id: placement_id.0.clone(),
+                        });
+                    };
+                    if !facings.in_range() {
+                        return Err(self.invalid_facing_count(&placement.shelf_id));
+                    }
+                    let target = candidate
+                        .placement_mut(placement_id)
+                        .expect("validated placement exists");
+                    target.facings_x = facings.facings_x;
+                    target.facings_y = facings.facings_y;
+                    target.facings_z = facings.facings_z;
+                    requested_operations.push(RequestedPlacementOperation::SetFacings {
+                        placement_id: placement_id.clone(),
+                        before: placement.facings(),
+                    });
+                    seen_placement_ids.push(placement_id.clone());
+                    push_unique(&mut touched_shelves, placement.shelf_id);
                     push_unique(&mut affected_ids, placement_id.0.clone());
                 }
                 PlacementChange::Remove { placement_id } => {
@@ -2327,6 +2606,28 @@ impl DraftVersion {
                     }
                     requested_reflow_ids.push(placement_id.clone());
                     operations.push(PlanogramOperation::ReflowPlacement(ReflowPlacement {
+                        placement_id,
+                        before,
+                        after,
+                    }));
+                }
+                RequestedPlacementOperation::SetFacings {
+                    placement_id,
+                    before,
+                } => {
+                    let after = candidate
+                        .placement(&placement_id)
+                        .expect("validated placement exists")
+                        .facings();
+                    if before == after {
+                        return Err(CommandResult::InvalidCommand {
+                            message: format!(
+                                "Placement {} already uses the requested facings.",
+                                placement_id.0
+                            ),
+                        });
+                    }
+                    operations.push(PlanogramOperation::ChangeFacings(ChangeFacings {
                         placement_id,
                         before,
                         after,
@@ -2619,6 +2920,7 @@ impl DraftVersion {
             }
             Some(PlanogramOperation::MovePlacement(_))
             | Some(PlanogramOperation::ReflowPlacement(_))
+            | Some(PlanogramOperation::ChangeFacings(_))
             | Some(PlanogramOperation::AddPlacement(_))
             | Some(PlanogramOperation::RemovePlacement(_)) => CommandResult::InvalidCommand {
                 message: "Change set has no reversible placement operation.".into(),
@@ -3112,6 +3414,10 @@ fn inverse_placement_changes(operations: &[PlanogramOperation]) -> Option<Vec<Pl
                     facings_x: operation.before.facings_x,
                     facings_y: operation.before.facings_y,
                     facings_z: operation.before.facings_z,
+                },
+                PlanogramOperation::ChangeFacings(operation) => PlacementChange::SetFacings {
+                    placement_id: operation.placement_id.clone(),
+                    facings: operation.before,
                 },
                 PlanogramOperation::AddPlacement(operation) => PlacementChange::Remove {
                     placement_id: operation.placement.id.clone(),

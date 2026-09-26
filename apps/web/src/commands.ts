@@ -1,4 +1,4 @@
-import type { CommandResult, ShelfDistribution, WasmEngine } from './types';
+import type { CommandResult, FacingsRequest, ShelfDistribution, WasmEngine } from './types';
 
 export type MoveSource = 'inspector' | 'keyboard' | 'pointer';
 
@@ -23,6 +23,22 @@ export interface MovePlacementInput {
 
 export function movePlacement(engine: WasmEngine, input: MovePlacementInput, source: MoveSource): CommandResult {
   return engine.move_placement(input.versionId, input.placementId, input.targetShelfId, input.xSixteenths, input.expectedRevision, `${source} move placement`);
+}
+
+export type FacingsSource = 'inspector' | 'keyboard' | 'webmcp';
+
+export interface SetFacingsInput extends FacingsRequest {
+  versionId: string;
+  placementId: string;
+  expectedRevision: number;
+  reason?: string;
+}
+
+export function setFacings(engine: WasmEngine, input: SetFacingsInput, source: FacingsSource): CommandResult {
+  if (source === 'webmcp') {
+    return engine.set_facings_as(input.versionId, input.placementId, input.facingsX, input.facingsY, input.facingsZ, input.expectedRevision, 'webmcp', input.reason ?? 'WebMCP set facings');
+  }
+  return engine.set_facings(input.versionId, input.placementId, input.facingsX, input.facingsY, input.facingsZ, input.expectedRevision, `${source} set facings`);
 }
 
 export type DistributionSource = 'inspector' | 'webmcp';

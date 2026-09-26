@@ -156,6 +156,19 @@ dd { margin: 0; font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospac
 .placement-form small { display: block; color: var(--muted); font-size: 11px; line-height: 1.4; margin-top: 8px; }
 .destructive-action { width: 100%; min-height: 41px; margin-top: 18px; border: 1px solid #e1aaa6; border-radius: 5px; background: #fff3f1; color: #a32923; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; font-weight: 750; }
 .destructive-action:hover { background: #ffe8e5; border-color: #d47c76; }
+.facings-form { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 17px; }
+.facings-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.facings-form legend { padding: 0; font-size: 12px; font-weight: 700; margin-bottom: 7px; }
+.facings-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.facings-fields label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.facings-fields input { min-width: 0; height: 39px; border: 1px solid #a9afb4; border-radius: 5px; padding: 0 10px; font: 600 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.facings-fields input:focus { border-color: var(--blue); }
+.facings-actions { display: grid; grid-template-columns: 39px 39px 1fr; gap: 7px; margin-top: 8px; }
+.facings-actions button { height: 39px; border-radius: 5px; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.facings-actions button[type="button"] { border: 1px solid #b9c9e8; background: #f2f6ff; color: #0d50c6; }
+.facings-actions button[type="submit"] { border: 0; background: var(--blue); color: white; }
+.facings-form fieldset:disabled input, .facings-form fieldset:disabled button { opacity: 0.5; cursor: not-allowed; }
+.facings-form small { display: block; color: var(--muted); font-size: 11px; line-height: 1.4; margin-top: 8px; }
 .keyboard-hint { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; text-align: center; }
 .error { margin: 11px 0 0; padding: 9px 10px; border-left: 3px solid var(--red); background: #fff1ef; color: #8d251f; font-size: 12px; line-height: 1.4; }
 .empty-selection { min-height: 145px; color: var(--muted); display: grid; align-content: center; justify-items: center; text-align: center; }

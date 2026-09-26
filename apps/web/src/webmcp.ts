@@ -462,12 +462,31 @@ function schemas(): SiteToolDefinition[] {
       },
       execute: () => undefined,
     },
+    {
+      name: 'planogram.set_facings',
+      title: 'Set product facings',
+      description: 'Sets the horizontal (facings_x), vertical (facings_y), and depth (facings_z) facing counts of one loose placement; omitted counts stay unchanged. The placement keeps its left edge. When it widens, Rust shifts the following products on the same shelf right only as far as the 1/8-inch minimum gap requires. Rust validates shelf bounds, vertical clearance, shelf depth, and the gap, then records one atomic change set or changes nothing. Loaded trays keep their catalog preset and reject any other facings.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          placement_id: { type: 'string', maxLength: 120 },
+          facings_x: { type: 'integer', minimum: 1, maximum: 100 },
+          facings_y: { type: 'integer', minimum: 1, maximum: 100 },
+          facings_z: { type: 'integer', minimum: 1, maximum: 100 },
+          expected_revision: { type: 'integer', minimum: 0 },
+          reason: { type: 'string', maxLength: 240 },
+        },
+        required: ['placement_id', 'expected_revision'],
+        additionalProperties: false,
+      },
+      execute: () => undefined,
+    },
   ];
 }
 
 function bindTools(session: PlanogramSession, getSelection: () => Selection | undefined): SiteToolDefinition[] {
   const tools = schemas();
-  const [contextTool, searchTool, productTool, sectionTool, validationTool, addTool, distributeTool, undoTool, allocationPreviewTool, previewTool, applyTool] = tools;
+  const [contextTool, searchTool, productTool, sectionTool, validationTool, addTool, distributeTool, undoTool, allocationPreviewTool, previewTool, applyTool, facingsTool] = tools;
   contextTool.execute = (_args, executionContext) => {
     const context = session.context();
     if (requestWasCancelled(executionContext)) return cancelled(context.revision);
@@ -612,6 +631,34 @@ function bindTools(session: PlanogramSession, getSelection: () => Selection | un
     const expectedRevision = readRequiredRevision(args, context.revision);
     if (typeof expectedRevision !== 'number') return expectedRevision;
     return mutationResult(session.applyChanges({ versionId: context.version_id, proposalId, expectedRevision }, 'webmcp'), session);
+  };
+  facingsTool.execute = (args, executionContext) => {
+    const context = session.context();
+    if (requestWasCancelled(executionContext)) return cancelled(context.revision);
+    const argumentError = validateArguments(args, ['placement_id', 'facings_x', 'facings_y', 'facings_z', 'expected_revision', 'reason'], context.revision);
+    if (argumentError) return argumentError;
+    const placementId = readRequiredString(args, 'placement_id', 120, context.revision);
+    if (typeof placementId !== 'string') return placementId;
+    const record = isRecord(args) ? args : {};
+    const facingsX = readOptionalFacing(record, 'facings_x', context.revision);
+    const facingsY = readOptionalFacing(record, 'facings_y', context.revision);
+    const facingsZ = readOptionalFacing(record, 'facings_z', context.revision);
+    for (const value of [facingsX, facingsY, facingsZ]) {
+      if (isToolError(value)) return value;
+    }
+    const expectedRevision = readRequiredRevision(args, context.revision);
+    if (typeof expectedRevision !== 'number') return expectedRevision;
+    const reason = readOptionalString(args, 'reason', 240, context.revision);
+    if (typeof reason !== 'string' && reason !== undefined) return reason;
+    return mutationResult(session.setFacings({
+      versionId: context.version_id,
+      placementId,
+      facingsX: facingsX as number | undefined,
+      facingsY: facingsY as number | undefined,
+      facingsZ: facingsZ as number | undefined,
+      expectedRevision,
+      reason,
+    }, 'webmcp'), session);
   };
   undoTool.execute = (args, executionContext) => {
     const context = session.context();

@@ -965,6 +965,189 @@ fn fill_evenly_allocates_facings_in_rust_previews_applies_and_undoes_atomically(
     assert_eq!(draft.placements, before);
 }
 
+/// Requests only the named facing counts; omitted counts keep their current value.
+fn facings(x: Option<u32>, y: Option<u32>, z: Option<u32>) -> FacingsRequest {
+    FacingsRequest {
+        facings_x: x,
+        facings_y: y,
+        facings_z: z,
+    }
+}
+
+fn set_facings(
+    draft: &mut DraftVersion,
+    placement_id: &str,
+    request: FacingsRequest,
+) -> CommandResult {
+    let version = draft.id.clone();
+    let revision = draft.revision;
+    draft.set_facings(
+        &version,
+        &PlacementId::new(placement_id),
+        request,
+        revision,
+        "inspector set facings",
+    )
+}
+
+#[test]
+fn set_facings_pushes_following_placements_in_one_change_set_and_undoes_exactly() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    for _ in 0..3 {
+        add(&mut draft, "jif_crunchy_16", "shelf_01");
+    }
+    let positions = |draft: &DraftVersion| {
+        shelf_views(draft, "shelf_01")
+            .iter()
+            .map(|view| view.x.sixteenths())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(positions(&draft), vec![0, 60, 120]);
+    let before = draft.placements.clone();
+
+    let widened = expect_applied(draft.set_facings_as(
+        &version,
+        &PlacementId::new("placement_0001"),
+        facings(Some(3), None, None),
+        3,
+        "webmcp",
+        "Give the lead item three facings",
+    ));
+    assert_eq!(widened.revision, 4);
+    assert_eq!(widened.change_set.actor, "webmcp");
+    assert_eq!(widened.affected_ids.len(), 3);
+    assert_eq!(widened.scene_patch.placements.len(), 3);
+    match widened.change_set.operations.as_slice() {
+        [PlanogramOperation::ChangeFacings(change), PlanogramOperation::MovePlacement(first), PlanogramOperation::MovePlacement(second)] =>
+        {
+            assert_eq!(change.placement_id, PlacementId::new("placement_0001"));
+            assert_eq!((change.before.facings_x, change.after.facings_x), (1, 3));
+            assert_eq!((change.after.facings_y, change.after.facings_z), (1, 1));
+            assert_eq!(
+                (first.before.x.sixteenths(), first.after.x.sixteenths()),
+                (60, 174)
+            );
+            assert_eq!(
+                (second.before.x.sixteenths(), second.after.x.sixteenths()),
+                (120, 234)
+            );
+        }
+        operations => panic!("unexpected operations: {operations:?}"),
+    }
+    let views = shelf_views(&draft, "shelf_01");
+    assert_eq!(views[0].geometry.display_width.sixteenths(), 171);
+    assert_eq!(positions(&draft), vec![0, 174, 234]);
+    for pair in views.windows(2) {
+        assert!(pair[1].x - (pair[0].x + pair[0].geometry.display_width) >= MIN_PLACEMENT_GAP);
+    }
+
+    let undone = expect_applied(draft.undo_change_set(&version, &widened.change_set.id, 4));
+    assert_eq!(undone.revision, 5);
+    assert_eq!(undone.change_set.compensates, Some(widened.change_set.id));
+    assert_eq!(draft.placements, before);
+
+    // Stacking vertically keeps the width, so no neighbor moves.
+    let stacked = expect_applied(set_facings(
+        &mut draft,
+        "placement_0002",
+        facings(None, Some(2), None),
+    ));
+    assert_eq!(stacked.change_set.operations.len(), 1);
+    assert_eq!(positions(&draft), vec![0, 60, 120]);
+    let stacked_view = draft
+        .placement_view(&PlacementId::new("placement_0002"))
+        .unwrap();
+    assert_eq!(
+        (stacked_view.facings_y, stacked_view.stocked_unit_count),
+        (2, 2)
+    );
+    assert_eq!(stacked_view.geometry.display_height.sixteenths(), 156);
+}
+
+#[test]
+fn set_facings_rejections_leave_geometry_revision_and_history_unchanged() {
+    let mut draft = DraftVersion::default();
+    add(&mut draft, "jif_crunchy_16", "shelf_01");
+    add(&mut draft, "jif_crunchy_16", "shelf_01");
+    add(&mut draft, "jif_creamy_16", "shelf_02");
+
+    // 3 × 78 exceeds the 12-inch clearance; 5 × 57 exceeds the 16-inch shelf depth.
+    for (request, code) in [
+        (
+            facings(None, Some(3), None),
+            ValidationCode::PlacementTooTall,
+        ),
+        (
+            facings(None, None, Some(5)),
+            ValidationCode::PlacementTooDeep,
+        ),
+        (
+            facings(Some(0), None, None),
+            ValidationCode::InvalidFacingCount,
+        ),
+        (
+            facings(Some(101), None, None),
+            ValidationCode::InvalidFacingCount,
+        ),
+        (
+            facings(Some(13), None, None),
+            ValidationCode::NoShelfCapacity,
+        ),
+    ] {
+        assert_rejected_unchanged(&mut draft, code, |draft| {
+            set_facings(draft, "placement_0001", request)
+        });
+    }
+    for request in [
+        facings(Some(4), None, None),
+        facings(None, Some(2), None),
+        facings(None, None, Some(3)),
+    ] {
+        assert_rejected_unchanged(&mut draft, ValidationCode::TrayFacingMismatch, |draft| {
+            set_facings(draft, "placement_0003", request)
+        });
+    }
+
+    let before = draft.clone();
+    for request in [
+        FacingsRequest::default(),
+        facings(Some(1), Some(1), Some(1)),
+    ] {
+        assert!(matches!(
+            set_facings(&mut draft, "placement_0001", request),
+            CommandResult::InvalidCommand { .. }
+        ));
+    }
+    assert!(matches!(
+        set_facings(
+            &mut draft,
+            "placement_0003",
+            facings(Some(3), Some(1), Some(4))
+        ),
+        CommandResult::InvalidCommand { .. }
+    ));
+    assert!(matches!(
+        set_facings(&mut draft, "placement_9999", facings(Some(2), None, None)),
+        CommandResult::NotFound { ref entity, .. } if entity == "placement"
+    ));
+    let version = draft.id.clone();
+    assert!(matches!(
+        draft.set_facings(
+            &version,
+            &PlacementId::new("placement_0001"),
+            facings(Some(2), None, None),
+            0,
+            "stale",
+        ),
+        CommandResult::RevisionConflict {
+            expected_revision: 0,
+            current_revision: 3
+        }
+    ));
+    assert_eq!(draft, before);
+}
+
 #[test]
 fn distribution_modes_resolve_deterministically_on_the_eighth_inch_grid() {
     let widths = [

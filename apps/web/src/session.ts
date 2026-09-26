@@ -4,16 +4,19 @@ import {
   movePlacement,
   moveShelf,
   removePlacement,
+  setFacings,
   undoChangeSet,
   type AddPlacementSource,
   type DistributionSource,
+  type FacingsSource,
   type MoveSource,
+  type SetFacingsInput,
   type RemovalSource,
   type UndoSource,
 } from './commands';
 import type { CommandResult, EngineContext, Placement, PlacementChange, PlanogramValidationResult, PreviewResult, Selection, Shelf, ShelfAllocationStrategy, ShelfDistribution, WasmEngine } from './types';
 
-export type SessionSource = MoveSource | AddPlacementSource | DistributionSource | RemovalSource | UndoSource;
+export type SessionSource = MoveSource | AddPlacementSource | DistributionSource | FacingsSource | RemovalSource | UndoSource;
 export type ProposalApprovalSource = 'human' | 'webmcp';
 
 export interface SessionProposal {
@@ -105,6 +108,10 @@ export class PlanogramSession {
 
   distributeShelf(input: { versionId: string; shelfId: string; distribution: ShelfDistribution; expectedRevision: number; reason?: string }, source: DistributionSource): CommandResult {
     return this.run(source, () => distributeShelf(this.engine, input, source));
+  }
+
+  setFacings(input: SetFacingsInput, source: FacingsSource): CommandResult {
+    return this.run(source, () => setFacings(this.engine, input, source));
   }
 
   addPlacement(input: { versionId: string; productId: string; shelfId: string; expectedRevision: number; reason?: string }, source: AddPlacementSource): CommandResult {

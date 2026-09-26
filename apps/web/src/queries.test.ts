@@ -71,6 +71,17 @@ describe('Rust-derived placement geometry in queries', () => {
     });
   });
 
+  it('transports a Rust facing change with explicit before and after counts', () => {
+    const counts = (facings_x: number) => ({ facings_x, facings_y: 1, facings_z: 1 });
+    expect(toToolOperation({ type: 'change_facings', placement_id: 'placement_0001', before: counts(1), after: counts(3) })).toEqual({
+      type: 'change_facings',
+      placement_id: 'placement_0001',
+      before: counts(1),
+      after: counts(3),
+    });
+    expect(toToolOperation({ type: 'change_facings', placement_id: 'placement_0001', before: { facings_x: 1 }, after: counts(3) })).toEqual({ type: 'unknown' });
+  });
+
   it('transports the resolved footprint and uses it for contiguous shelf capacity', () => {
     expect(toToolPlacement(trayPlacement())).toMatchObject({
       stocking_mode: 'tray',

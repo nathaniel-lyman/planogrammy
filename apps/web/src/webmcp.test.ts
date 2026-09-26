@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlanogramSession } from './session';
 import { registerPlanogramWebMcp } from './webmcp';
-import { PERFORMANCE_SOURCE, VERSION_ID, adjustableShelf, appliedResult, baseDeck, changeSetId, makeContext, readyPreview, reflowOperation, revisionConflict, trayPlacement, trayProduct } from './testFixtures';
+import { PERFORMANCE_SOURCE, VERSION_ID, adjustableShelf, appliedResult, baseDeck, changeSetId, loosePlacement, looseProduct, makeContext, readyPreview, reflowOperation, revisionConflict, trayPlacement, trayProduct } from './testFixtures';
 import type { CommandResult, EngineContext, PreviewResult, WasmEngine } from './types';
 
 interface RegisteredTool {
@@ -38,6 +38,13 @@ const engine = {
     commit(actor, `Undo ${changeSetId}`, { placements: [], latest_undoable_change_set_id: undefined }))),
   distribute_shelf_as: vi.fn((_versionId: string, _shelfId: string, _distribution: string, expectedRevision: number, actor: string, reason: string) => guarded(expectedRevision, () =>
     commit(actor, reason, {}, [], activeContext.placements.map(placement => placement.id)))),
+  set_facings_as: vi.fn((_versionId: string, placementId: string, facingsX: number | undefined, facingsY: number | undefined, facingsZ: number | undefined, expectedRevision: number, actor: string, reason: string) => guarded(expectedRevision, () => {
+    const current = activeContext.placements.find(placement => placement.id === placementId)!;
+    const counts = { facings_x: facingsX ?? current.facings_x, facings_y: facingsY ?? current.facings_y, facings_z: facingsZ ?? current.facings_z };
+    const updated = { ...current, ...counts };
+    const operation = { type: 'change_facings', placement_id: placementId, before: { facings_x: current.facings_x, facings_y: current.facings_y, facings_z: current.facings_z }, after: counts };
+    return commit(actor, reason, { placements: [updated] }, [operation], [placementId]);
+  })),
   preview_changes: vi.fn((_versionId: string, expectedRevision: number) => guarded(expectedRevision, () =>
     readyPreview(activeContext.revision, [{ type: 'add_placement', placement: trayPlacement() }]))),
   preview_shelf_allocation: vi.fn((_versionId: string, _shelfId: string, _strategy: string, expectedRevision: number) => guarded(expectedRevision, () =>
@@ -81,12 +88,12 @@ describe('WebMCP site tools', () => {
   });
 
   it('registers strict read and write tools only after WebMCP support is present', () => {
-    expect(registered).toHaveLength(11);
+    expect(registered).toHaveLength(12);
     expect(registered.every(registeredTool => registeredTool.inputSchema.additionalProperties === false)).toBe(true);
     for (const name of ['get_planogram_context', 'validate_planogram', 'preview_shelf_allocation', 'preview_changes']) {
       expect(tool(`planogram.${name}`).annotations?.readOnlyHint).toBe(true);
     }
-    for (const name of ['add_product', 'distribute_shelf', 'apply_changes']) {
+    for (const name of ['add_product', 'distribute_shelf', 'set_facings', 'apply_changes']) {
       expect(tool(`planogram.${name}`).annotations).toBeUndefined();
     }
   });
@@ -158,6 +165,29 @@ describe('WebMCP site tools', () => {
 
     expect(await execute('planogram.distribute_shelf', { shelf_id: 'shelf_01', distribution: 'space_evenly', expected_revision: 4, reason: 'Balance the shelf' })).toMatchObject({ status: 'applied', revision: 5, affected_ids: ['placement_0001', 'placement_0002'] });
     expect(engine.distribute_shelf_as).toHaveBeenCalledWith(VERSION_ID, 'shelf_01', 'space_evenly', 4, 'webmcp', 'Balance the shelf');
+  });
+
+  it('routes semantic facing counts to Rust and leaves omitted counts unresolved', async () => {
+    activeContext = { ...activeContext, revision: 4, products: [trayProduct, looseProduct], placements: [loosePlacement()] };
+
+    for (const args of [
+      { placement_id: 'placement_0002', facings_x: 0, expected_revision: 4 },
+      { placement_id: 'placement_0002', facings_x: 2.5, expected_revision: 4 },
+      { placement_id: 'placement_0002', facings_x: 2, x_sixteenths: 10, expected_revision: 4 },
+    ]) {
+      expect(await execute('planogram.set_facings', args)).toMatchObject({ status: 'error', code: 'invalid_input', revision: 4 });
+    }
+    expect(engine.set_facings_as).not.toHaveBeenCalled();
+
+    expect(await execute('planogram.set_facings', { placement_id: 'placement_0002', facings_x: 3, expected_revision: 4, reason: 'Match facings to movement' })).toMatchObject({
+      status: 'applied',
+      revision: 5,
+      placement: { id: 'placement_0002', facings_x: 3, facings_y: 1, facings_z: 1 },
+      change_set: { actor: 'webmcp', reason: 'Match facings to movement', operations: [{ type: 'change_facings', placement_id: 'placement_0002', before: { facings_x: 1 }, after: { facings_x: 3 } }] },
+    });
+    expect(engine.set_facings_as).toHaveBeenCalledWith(VERSION_ID, 'placement_0002', 3, undefined, undefined, 4, 'webmcp', 'Match facings to movement');
+
+    expect(await execute('planogram.set_facings', { placement_id: 'placement_0002', facings_y: 2, expected_revision: 4 })).toMatchObject({ status: 'revision_conflict', expected_revision: 4, current_revision: 5 });
   });
 
   it('previews and applies Rust-owned shelf-facing allocation without model-supplied coordinates', async () => {

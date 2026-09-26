@@ -118,6 +118,13 @@ export interface RenderScene {
   placements: PlacementSceneNode[];
 }
 
+/** Requested facing counts; an omitted count keeps the placement's current value in Rust. */
+export interface FacingsRequest {
+  facingsX?: number;
+  facingsY?: number;
+  facingsZ?: number;
+}
+
 export type ShelfDistribution = 'packed_left' | 'centered' | 'space_between' | 'space_evenly';
 export type ShelfAllocationStrategy = 'fill_evenly';
 
@@ -172,6 +179,8 @@ export interface WasmEngine {
   validate_planogram(): PlanogramValidationResult;
   move_shelf(versionId: string, shelfId: string, elevationSixteenths: number, expectedRevision: number, reason: string): CommandResult;
   move_placement(versionId: string, placementId: string, targetShelfId: string, xSixteenths: number, expectedRevision: number, reason: string): CommandResult;
+  set_facings(versionId: string, placementId: string, facingsX: number | undefined, facingsY: number | undefined, facingsZ: number | undefined, expectedRevision: number, reason: string): CommandResult;
+  set_facings_as(versionId: string, placementId: string, facingsX: number | undefined, facingsY: number | undefined, facingsZ: number | undefined, expectedRevision: number, actor: string, reason: string): CommandResult;
   distribute_shelf(versionId: string, shelfId: string, distribution: ShelfDistribution, expectedRevision: number, reason: string): CommandResult;
   distribute_shelf_as(versionId: string, shelfId: string, distribution: ShelfDistribution, expectedRevision: number, actor: string, reason: string): CommandResult;
   add_placement(versionId: string, productId: string, shelfId: string, expectedRevision: number, reason: string): CommandResult;

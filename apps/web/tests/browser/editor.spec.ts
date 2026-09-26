@@ -3,7 +3,7 @@ import { expect, test, type Page } from '@playwright/test';
 type SiteTool = { name: string; execute: (args: unknown, context?: { signal?: AbortSignal }) => Promise<unknown> };
 type SiteToolWindow = Window & { __planogramSiteTools: SiteTool[] };
 
-const SITE_TOOL_COUNT = 11;
+const SITE_TOOL_COUNT = 12;
 const SYNTHETIC_SOURCE = 'Synthetic representative 13-week average; not retailer actuals';
 
 /** Opens the editor and skips when the browser lacks WebGPU entirely. */
@@ -163,7 +163,7 @@ test('moves a selected placement by eighths and between shelves through one insp
   await placement.click();
   const position = page.getByLabel('Position', { exact: true });
   const shelf = page.getByLabel('Shelf', { exact: true });
-  const apply = page.getByRole('button', { name: 'Apply' });
+  const apply = page.locator('.placement-form').getByRole('button', { name: 'Apply' });
   await expect(position).toHaveValue('0"');
 
   await placement.press('ArrowRight');
@@ -205,6 +205,7 @@ test('registers site tools and applies the first WebMCP write through the live p
     'planogram.preview_shelf_allocation',
     'planogram.preview_changes',
     'planogram.apply_changes',
+    'planogram.set_facings',
   ]);
 
   expect(await callSiteTool(page, 'planogram.get_product', { product_id: 'jif_creamy_16' })).toMatchObject({
@@ -331,4 +332,64 @@ test('enforces the product gap and distributes a shelf evenly as one undoable ch
   await expect(page.getByRole('alert')).toContainText('at least a 1/8-inch gap');
   await expectRevision(page, 4);
   await expect(position).toHaveValue('11 1/8"');
+});
+
+test('sets loose facings from the inspector and keyboard, pushes neighbors, rejects overflow, and undoes exactly', async ({ page }) => {
+  await openEditor(page);
+  await page.getByLabel('Filter by stocking mode').selectOption('loose');
+  await page.getByRole('button', { name: /^Jif Extra Crunchy Peanut Butter 16 oz/ }).click();
+  await page.getByRole('button', { name: /Shelf 01/ }).click();
+  const add = page.getByRole('button', { name: /Add .*selected shelf/ });
+  await add.click();
+  await add.click();
+  await skipUnlessRevision(page, 2);
+
+  const companion = page.locator('.companion');
+  const crunchy = (position: string, facings: string) => companion.getByRole('button', { name: new RegExp(`Jif Extra Crunchy Peanut Butter.*at ${position} · Loose · ${facings} facings`) });
+  await expect(crunchy('3 3/4"', '1 × 1 × 1')).toBeVisible();
+
+  await crunchy('0"', '1 × 1 × 1').click();
+  await page.getByLabel('Wide').fill('3');
+  await page.getByRole('button', { name: 'Apply facings' }).click();
+  await expectRevision(page, 3);
+  await expect(crunchy('0"', '3 × 1 × 1')).toBeVisible();
+  await expect(crunchy('10 7/8"', '1 × 1 × 1')).toBeVisible();
+
+  const lead = crunchy('0"', '3 × 1 × 1');
+  await lead.focus();
+  await lead.press('-');
+  await expectRevision(page, 4);
+  await expect(crunchy('0"', '2 × 1 × 1')).toBeVisible();
+  await expect(crunchy('10 7/8"', '1 × 1 × 1')).toBeVisible();
+
+  await page.getByLabel('High').fill('3');
+  await page.getByRole('button', { name: 'Apply facings' }).click();
+  await expect(page.getByRole('alert')).toContainText('too tall');
+  await expectRevision(page, 4);
+
+  const undo = page.getByRole('button', { name: 'Undo' });
+  await undo.click();
+  await expectRevision(page, 5);
+  await expect(crunchy('0"', '3 × 1 × 1')).toBeVisible();
+  await undo.click();
+  await expectRevision(page, 6);
+  await expect(crunchy('0"', '1 × 1 × 1')).toBeVisible();
+  await expect(crunchy('3 3/4"', '1 × 1 × 1')).toBeVisible();
+});
+
+test('keeps loaded tray facings fixed in the inspector and through WebMCP', async ({ page }) => {
+  await openEditorWithSiteTools(page);
+  await addToShelf01(page);
+  await placementAt(page, '0"').click();
+  for (const control of [page.getByLabel('Wide'), page.getByLabel('High'), page.getByLabel('Deep'), page.getByRole('button', { name: 'Add one horizontal facing' }), page.getByRole('button', { name: 'Apply facings' })]) {
+    await expect(control).toBeDisabled();
+  }
+  await expect(page.getByText('Loaded trays keep their catalog preset facings.')).toBeVisible();
+
+  expect(await callSiteTool(page, 'planogram.set_facings', { placement_id: 'placement_0001', facings_x: 4, expected_revision: 1 })).toMatchObject({
+    status: 'validation_failed',
+    revision: 1,
+    validation: { issues: [{ code: 'tray_facing_mismatch' }] },
+  });
+  await expectRevision(page, 1);
 });

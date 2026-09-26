@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
 import { CheckCircle2, Focus, Minus, Package, PackagePlus, Plus, RotateCcw, Search, Sparkles, Trash2, Undo2, X, XCircle } from 'lucide-react';
-import { resultError, type MoveSource, type PlacementSource, type RemovalSource } from './commands';
+import { resultError, type FacingsSource, type MoveSource, type PlacementSource, type RemovalSource } from './commands';
 import { formatImperial, parseImperial } from './imperial';
 import { searchProducts } from './queries';
 import { PlanogramSession, type ProposalApprovalSource, type SessionProposal } from './session';
 import { useUiStore } from './store';
 import { registerPlanogramWebMcp } from './webmcp';
-import type { ChangeSet, CommandResult, Placement, Product, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
+import type { ChangeSet, CommandResult, FacingsRequest, Placement, Product, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
 
 const CANVAS_ID = 'planogram-canvas';
 const SHELF_READY_TRAY_LABEL = 'Shelf-ready tray';
@@ -230,6 +230,8 @@ export function App() {
   const [elevationInput, setElevationInput] = useState('');
   const [placementShelfInput, setPlacementShelfInput] = useState('');
   const [placementXInput, setPlacementXInput] = useState('');
+  const [facingsInput, setFacingsInput] = useState({ x: '', y: '', z: '' });
+  const [placementControl, setPlacementControl] = useState<'position' | 'facings'>('position');
   const [shelfDistribution, setShelfDistribution] = useState<ShelfDistribution>('space_evenly');
   const [zoomLabel, setZoomLabel] = useState(100);
   const [productQuery, setProductQuery] = useState('');
@@ -291,6 +293,7 @@ export function App() {
     const session = sessionRef.current;
     const current = useUiStore.getState().context;
     if (!session || !current || !targetShelfId) return;
+    setPlacementControl('position');
     setCommand('working');
     const result = session.movePlacement({
       versionId: current.version_id,
@@ -310,6 +313,15 @@ export function App() {
     if (!shelf || shelf.kind === 'base_deck') { setCommand('rejected', 'Select an adjustable shelf before adding a product.'); return; }
     setCommand('working');
     return session.addPlacement({ versionId: current.version_id, productId, shelfId, expectedRevision: current.revision }, source);
+  }, [setCommand]);
+
+  const issueFacings = useCallback((placement: Placement, request: FacingsRequest, source: FacingsSource) => {
+    const session = sessionRef.current;
+    const current = useUiStore.getState().context;
+    if (!session || !current) return;
+    setPlacementControl('facings');
+    setCommand('working');
+    return session.setFacings({ versionId: current.version_id, placementId: placement.id, expectedRevision: current.revision, ...request }, source);
   }, [setCommand]);
 
   const issueDistribution = useCallback((shelf: Shelf, distribution: ShelfDistribution) => {
@@ -360,8 +372,16 @@ export function App() {
       issuePlacementMove(placement, placement.shelf_id, placement.x + direction * 2, 'keyboard');
       return;
     }
+    if (placementId && ['+', '=', '-', '_'].includes(event.key)) {
+      const placement = useUiStore.getState().context?.placements.find(item => item.id === placementId);
+      if (!placement) return;
+      event.preventDefault();
+      const direction = ['+', '='].includes(event.key) ? 1 : -1;
+      issueFacings(placement, { facingsX: placement.facings_x + direction }, 'keyboard');
+      return;
+    }
     keyboardMove(event);
-  }, [issuePlacementMove, issueRemoval, keyboardMove, selectedPlacement?.id]);
+  }, [issueFacings, issuePlacementMove, issueRemoval, keyboardMove, selectedPlacement?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -421,6 +441,12 @@ export function App() {
     setPlacementShelfInput(selectedPlacement?.shelf_id ?? '');
     setPlacementXInput(selectedPlacement ? formatImperial(selectedPlacement.x) : '');
   }, [selectedPlacement?.id, selectedPlacement?.shelf_id, selectedPlacement?.x]);
+
+  useEffect(() => {
+    setFacingsInput(selectedPlacement
+      ? { x: String(selectedPlacement.facings_x), y: String(selectedPlacement.facings_y), z: String(selectedPlacement.facings_z) }
+      : { x: '', y: '', z: '' });
+  }, [selectedPlacement?.id, selectedPlacement?.facings_x, selectedPlacement?.facings_y, selectedPlacement?.facings_z]);
 
   useEffect(() => setRevisionRequested(false), [proposal?.id]);
 
@@ -526,6 +552,22 @@ export function App() {
     }
   };
 
+  const submitFacings = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedPlacement) return;
+    const counts = [facingsInput.x, facingsInput.y, facingsInput.z].map(value => value.trim());
+    const resetInput = () => setFacingsInput({ x: String(selectedPlacement.facings_x), y: String(selectedPlacement.facings_y), z: String(selectedPlacement.facings_z) });
+    if (!counts.every(value => /^\d+$/.test(value))) {
+      setPlacementControl('facings');
+      setCommand('rejected', 'Facings must be whole numbers.');
+      resetInput();
+      return;
+    }
+    const [facingsX, facingsY, facingsZ] = counts.map(Number);
+    const result = issueFacings(selectedPlacement, { facingsX, facingsY, facingsZ }, 'inspector');
+    if (result?.status !== 'applied') resetInput();
+  };
+
   const submitDistribution = (event: React.FormEvent) => {
     event.preventDefault();
     if (!selectedShelf || selectedShelf.kind !== 'adjustable' || selectedShelfPlacementCount === 0) return;
@@ -601,7 +643,7 @@ export function App() {
             onDragOver={event => { if (event.dataTransfer.types.includes('application/x-planogram-product')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
             onDrop={event => { event.preventDefault(); const productId = event.dataTransfer.getData('application/x-planogram-product'); const point = pointerPosition(event); const hit = sessionRef.current?.engine.hit_test(point.x, point.y); const shelfId = hit?.kind === 'shelf' ? hit.id : hit?.shelf_id; if (productId) { if (shelfId) selectTarget({ kind: 'shelf', id: shelfId }); issuePlacement(productId, shelfId, 'catalog_drag'); } }}
           />
-          {!proposal && <div className="canvas-help">Select products or shelves · Arrows move selected products 1/8" · Drag shelves at 1" · Scroll to zoom</div>}
+          {!proposal && <div className="canvas-help">Select products or shelves · Arrows move selected products 1/8" · + / − change facings · Drag shelves at 1" · Scroll to zoom</div>}
           {proposal && <div className="proposal-legend" aria-label="Proposal preview legend"><span><Package size={13}/>Current placement</span><span><PackagePlus size={13}/>Proposed position</span></div>}
         </div>
 
@@ -680,7 +722,22 @@ export function App() {
                 <label htmlFor="placement-x">Position</label>
                 <div className="field-row"><input id="placement-x" value={placementXInput} onChange={event => setPlacementXInput(event.target.value)} aria-describedby="placement-help placement-error"/><button>Apply</button></div>
                 <small id="placement-help">Arrow keys move left or right in exact 1/8&quot; increments. Apply changes the shelf and position together.</small>
-                {error && <p id="placement-error" className="error" role="alert">{error}</p>}
+                {error && placementControl === 'position' && <p id="placement-error" className="error" role="alert">{error}</p>}
+              </form>
+              <form onSubmit={submitFacings} className="facings-form">
+                <fieldset disabled={selectedPlacement.stocking_mode === 'tray'}>
+                  <legend>Facings</legend>
+                  <div className="facings-fields">
+                    {([['x', 'Wide'], ['y', 'High'], ['z', 'Deep']] as const).map(([axis, label]) => <label key={axis}><span>{label}</span><input id={`facings-${axis}`} inputMode="numeric" value={facingsInput[axis]} onChange={event => setFacingsInput(current => ({ ...current, [axis]: event.target.value }))} aria-describedby="facings-help placement-error"/></label>)}
+                  </div>
+                  <div className="facings-actions">
+                    <button type="button" onClick={() => issueFacings(selectedPlacement, { facingsX: selectedPlacement.facings_x - 1 }, 'inspector')} aria-label="Remove one horizontal facing"><Minus size={15}/></button>
+                    <button type="button" onClick={() => issueFacings(selectedPlacement, { facingsX: selectedPlacement.facings_x + 1 }, 'inspector')} aria-label="Add one horizontal facing"><Plus size={15}/></button>
+                    <button type="submit">Apply facings</button>
+                  </div>
+                </fieldset>
+                <small id="facings-help">{selectedPlacement.stocking_mode === 'tray' ? 'Loaded trays keep their catalog preset facings.' : 'Plus and minus keys change horizontal facings. A wider placement pushes the products to its right along the shelf.'}</small>
+                {error && placementControl === 'facings' && <p id="placement-error" className="error" role="alert">{error}</p>}
               </form>
               <button className="destructive-action" onClick={() => issueRemoval(selectedPlacement.id, 'inspector')}><Trash2 size={16}/>Remove product</button>
               <small className="keyboard-hint">Delete or Backspace also removes this placement.</small>
@@ -689,7 +746,7 @@ export function App() {
 
           <section className="inspector-section companion" aria-labelledby="companion-heading">
             <div className="companion-heading"><div><span className="section-label">Accessible companion</span><h2 id="companion-heading">Fixture outline</h2></div><span>{shelves.length} levels</span></div>
-            <p className="sr-only">Fixture width {context && formatImperial(context.fixture.width)} and height {context && formatImperial(context.fixture.height)}. Current revision {context?.revision ?? 0}. Placement entries identify loose or tray stocking, resolved facings, stocked units, and loaded footprint. Keyboard commands: arrow keys move a selected adjustable shelf one inch or move a selected placement left and right in 1/8-inch increments. Placement shelf and position can be changed together in the inspector. Selected shelves can pack, center, space between, or space products evenly while keeping a 1/8-inch minimum gap. Delete or Backspace removes a selected product placement. The base deck is fixed.</p>
+            <p className="sr-only">Fixture width {context && formatImperial(context.fixture.width)} and height {context && formatImperial(context.fixture.height)}. Current revision {context?.revision ?? 0}. Placement entries identify loose or tray stocking, resolved facings, stocked units, and loaded footprint. Keyboard commands: arrow keys move a selected adjustable shelf one inch or move a selected placement left and right in 1/8-inch increments. Placement shelf and position can be changed together in the inspector. Plus and minus keys add or remove one horizontal facing of a selected loose placement, and the inspector sets wide, high, and deep facings; a wider placement pushes following products right, and loaded trays keep their preset facings. Selected shelves can pack, center, space between, or space products evenly while keeping a 1/8-inch minimum gap. Delete or Backspace removes a selected product placement. The base deck is fixed.</p>
             <ol className="shelf-list">
               {shelves.map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelf.kind === 'base_deck' ? 'Base deck' : shelf.id.replace('shelf_', 'Shelf ')}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = `${product?.brand ?? 'Product'} ${product?.description ?? placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
             </ol>

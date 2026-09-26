@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addPlacement, distributeShelf, movePlacement, moveShelf, removePlacement } from './commands';
+import { addPlacement, distributeShelf, movePlacement, moveShelf, removePlacement, setFacings } from './commands';
 import { appliedResult } from './testFixtures';
 import type { WasmEngine } from './types';
 
@@ -36,6 +36,16 @@ describe('semantic product placement', () => {
     const { command, engine } = engineWith('remove_placement');
     removePlacement(engine, { versionId: 'v1', placementId: 'placement_0001', expectedRevision: 7 }, 'keyboard');
     expect(command).toHaveBeenCalledWith('v1', 'placement_0001', 7, 'keyboard remove product');
+  });
+
+  it('routes inspector and keyboard facing intent through one Rust command, leaving omitted counts to Rust', () => {
+    const { command, engine } = engineWith('set_facings');
+    setFacings(engine, { versionId: 'v1', placementId: 'placement_0001', facingsX: 3, facingsY: 2, facingsZ: 1, expectedRevision: 7 }, 'inspector');
+    setFacings(engine, { versionId: 'v1', placementId: 'placement_0001', facingsX: 4, expectedRevision: 8 }, 'keyboard');
+    expect(command.mock.calls).toEqual([
+      ['v1', 'placement_0001', 3, 2, 1, 7, 'inspector set facings'],
+      ['v1', 'placement_0001', 4, undefined, undefined, 8, 'keyboard set facings'],
+    ]);
   });
 
   it('routes shelf distribution intent without calculating coordinates in TypeScript', () => {

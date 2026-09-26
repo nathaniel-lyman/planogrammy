@@ -1,6 +1,6 @@
 use planogram_core::{
-    ChangeSetId, CommandResult, DraftVersion, Length, PlacementChange, PlacementId, ProductId,
-    ShelfAllocationStrategy, ShelfDistribution, ShelfId, VersionId,
+    ChangeSetId, CommandResult, DraftVersion, FacingsRequest, Length, PlacementChange, PlacementId,
+    ProductId, ShelfAllocationStrategy, ShelfDistribution, ShelfId, VersionId,
 };
 use planogram_render::{Selection, WebGpuRenderer};
 use serde::{Deserialize, Serialize};
@@ -238,6 +238,60 @@ impl PlanogramEngine {
             &ShelfId::new(target_shelf_id),
             Length::from_sixteenths(x_sixteenths),
             u64::from(expected_revision),
+            reason,
+        );
+        self.apply_result_to_renderer(&result);
+        to_js(&result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_facings(
+        &mut self,
+        version_id: String,
+        placement_id: String,
+        facings_x: Option<u32>,
+        facings_y: Option<u32>,
+        facings_z: Option<u32>,
+        expected_revision: u32,
+        reason: String,
+    ) -> Result<JsValue, JsValue> {
+        let result = self.draft.set_facings(
+            &VersionId::new(version_id),
+            &PlacementId::new(placement_id),
+            FacingsRequest {
+                facings_x,
+                facings_y,
+                facings_z,
+            },
+            u64::from(expected_revision),
+            reason,
+        );
+        self.apply_result_to_renderer(&result);
+        to_js(&result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_facings_as(
+        &mut self,
+        version_id: String,
+        placement_id: String,
+        facings_x: Option<u32>,
+        facings_y: Option<u32>,
+        facings_z: Option<u32>,
+        expected_revision: u32,
+        actor: String,
+        reason: String,
+    ) -> Result<JsValue, JsValue> {
+        let result = self.draft.set_facings_as(
+            &VersionId::new(version_id),
+            &PlacementId::new(placement_id),
+            FacingsRequest {
+                facings_x,
+                facings_y,
+                facings_z,
+            },
+            u64::from(expected_revision),
+            actor,
             reason,
         );
         self.apply_result_to_renderer(&result);

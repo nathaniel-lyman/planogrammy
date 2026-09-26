@@ -200,6 +200,11 @@ function serializedConfiguration(value: unknown): Record<string, unknown> | unde
   };
 }
 
+function serializedFacings(value: unknown): { facings_x: number; facings_y: number; facings_z: number } | undefined {
+  if (!isRecord(value) || !isIntegerNumber(value.facings_x) || !isIntegerNumber(value.facings_y) || !isIntegerNumber(value.facings_z)) return undefined;
+  return { facings_x: value.facings_x, facings_y: value.facings_y, facings_z: value.facings_z };
+}
+
 export function toToolOperation(value: unknown): Record<string, unknown> {
   if (!isRecord(value) || typeof value.type !== 'string') return { type: 'unknown' };
   switch (value.type) {
@@ -217,6 +222,12 @@ export function toToolOperation(value: unknown): Record<string, unknown> {
     case 'reflow_placement': {
       const before = serializedConfiguration(value.before);
       const after = serializedConfiguration(value.after);
+      if (typeof value.placement_id === 'string' && before && after) return { type: value.type, placement_id: value.placement_id, before, after };
+      break;
+    }
+    case 'change_facings': {
+      const before = serializedFacings(value.before);
+      const after = serializedFacings(value.after);
       if (typeof value.placement_id === 'string' && before && after) return { type: value.type, placement_id: value.placement_id, before, after };
       break;
     }
