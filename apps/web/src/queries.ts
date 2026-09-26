@@ -89,6 +89,7 @@ export interface PlanogramContextToolResult {
     product_count: number;
     placement_count: number;
     latest_change_set_id: string | null;
+    latest_undoable_change_set_id: string | null;
   };
 }
 
@@ -187,6 +188,18 @@ function serializedLocation(value: unknown): { shelf_id: string; x_sixteenths: n
   return { shelf_id: value.shelf_id, x_sixteenths: value.x };
 }
 
+function serializedConfiguration(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value) || typeof value.shelf_id !== 'string' || !isIntegerNumber(value.x)
+    || !isIntegerNumber(value.facings_x) || !isIntegerNumber(value.facings_y) || !isIntegerNumber(value.facings_z)) return undefined;
+  return {
+    shelf_id: value.shelf_id,
+    x_sixteenths: value.x,
+    facings_x: value.facings_x,
+    facings_y: value.facings_y,
+    facings_z: value.facings_z,
+  };
+}
+
 export function toToolOperation(value: unknown): Record<string, unknown> {
   if (!isRecord(value) || typeof value.type !== 'string') return { type: 'unknown' };
   switch (value.type) {
@@ -198,6 +211,12 @@ export function toToolOperation(value: unknown): Record<string, unknown> {
     case 'move_placement': {
       const before = serializedLocation(value.before);
       const after = serializedLocation(value.after);
+      if (typeof value.placement_id === 'string' && before && after) return { type: value.type, placement_id: value.placement_id, before, after };
+      break;
+    }
+    case 'reflow_placement': {
+      const before = serializedConfiguration(value.before);
+      const after = serializedConfiguration(value.after);
       if (typeof value.placement_id === 'string' && before && after) return { type: value.type, placement_id: value.placement_id, before, after };
       break;
     }
@@ -251,6 +270,7 @@ export function getPlanogramContext(context: EngineContext, selection: Selection
       product_count: context.products.length,
       placement_count: context.placements.length,
       latest_change_set_id: context.latest_change_set_id ?? null,
+      latest_undoable_change_set_id: context.latest_undoable_change_set_id ?? null,
     },
   };
 }

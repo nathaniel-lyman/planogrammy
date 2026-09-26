@@ -67,6 +67,7 @@ function makeContext(): EngineContext {
     products: [product],
     placements: [],
     latest_change_set_id: undefined,
+    latest_undoable_change_set_id: undefined,
   };
 }
 
@@ -120,19 +121,20 @@ describe('WebMCP site tools', () => {
     const add_placement_as = vi.fn((_versionId: string, productId: string, shelfId: string, expectedRevision: number, actor: string, reason: string) => {
       if (expectedRevision !== activeContext.revision) return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: activeContext.revision } satisfies CommandResult;
       const placement = { ...placementView('placement_0001', shelfId), product_id: productId };
-      activeContext = { ...activeContext, revision: 1, placements: [placement], latest_change_set_id: 'change_0001' };
+      activeContext = { ...activeContext, revision: 1, placements: [placement], latest_change_set_id: 'change_0001', latest_undoable_change_set_id: 'change_0001' };
       return appliedResult(1, actor, reason, 'change_0001', placement);
     });
     const undo_change_set_as = vi.fn((_versionId: string, _changeSetId: string, expectedRevision: number, actor: string) => {
       if (expectedRevision !== activeContext.revision) return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: activeContext.revision } satisfies CommandResult;
-      activeContext = { ...activeContext, revision: 2, placements: [], latest_change_set_id: 'change_0002' };
+      activeContext = { ...activeContext, revision: 2, placements: [], latest_change_set_id: 'change_0002', latest_undoable_change_set_id: undefined };
       return appliedResult(2, actor, 'Undo change_0001', 'change_0002');
     });
     const distribute_shelf_as = vi.fn((_versionId: string, shelfId: string, _distribution: string, expectedRevision: number, actor: string, reason: string) => {
       if (expectedRevision !== activeContext.revision) return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: activeContext.revision } satisfies CommandResult;
       const revision = activeContext.revision + 1;
       const placements = activeContext.placements.map((placement, index) => ({ ...placement, shelf_id: shelfId, x: 120 + index * 180 }));
-      activeContext = { ...activeContext, revision, placements, latest_change_set_id: `change_${String(revision).padStart(4, '0')}` };
+      const changeSetId = `change_${String(revision).padStart(4, '0')}`;
+      activeContext = { ...activeContext, revision, placements, latest_change_set_id: changeSetId, latest_undoable_change_set_id: changeSetId };
       const result = appliedResult(revision, actor, reason, activeContext.latest_change_set_id!);
       return { ...result, affected_ids: placements.map(placement => placement.id) };
     });
@@ -171,11 +173,61 @@ describe('WebMCP site tools', () => {
         },
       };
     });
+    const preview_shelf_allocation = vi.fn((_versionId: string, shelfId: string, _strategy: string, expectedRevision: number) => {
+      if (expectedRevision !== activeContext.revision) return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: activeContext.revision };
+      const current = activeContext.placements[0] ?? placementView();
+      const after = { ...current, shelf_id: shelfId, x: 4, facings_x: 4, stocked_unit_count: 4, geometry: { ...current.geometry, display_width: 228 } };
+      return {
+        status: 'ready',
+        revision: activeContext.revision,
+        operations: [{
+          type: 'reflow_placement',
+          placement_id: current.id,
+          before: { shelf_id: current.shelf_id, x: current.x, facings_x: current.facings_x, facings_y: current.facings_y, facings_z: current.facings_z },
+          after: { shelf_id: after.shelf_id, x: after.x, facings_x: after.facings_x, facings_y: after.facings_y, facings_z: after.facings_z },
+        }],
+        affected_ids: [current.id],
+        validation: { issues: [] },
+        preview_scene: {
+          revision: activeContext.revision,
+          fixture_id: activeContext.fixture.id,
+          width: activeContext.fixture.width,
+          height: activeContext.fixture.height,
+          shelves: activeContext.fixture.sections.flatMap(section => section.shelves),
+          placements: [],
+        },
+      };
+    });
     const apply_changes_as = vi.fn((_versionId: string, expectedRevision: number, _changes: unknown[], actor: string, reason: string) => {
       if (expectedRevision !== activeContext.revision) return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: activeContext.revision } satisfies CommandResult;
       const placement = placementView();
-      activeContext = { ...activeContext, revision: activeContext.revision + 1, placements: [placement], latest_change_set_id: 'change_0001' };
+      activeContext = { ...activeContext, revision: activeContext.revision + 1, placements: [placement], latest_change_set_id: 'change_0001', latest_undoable_change_set_id: 'change_0001' };
       return appliedResult(activeContext.revision, actor, reason, 'change_0001', placement);
+    });
+    const apply_shelf_allocation_as = vi.fn((_versionId: string, shelfId: string, _strategy: string, expectedRevision: number, actor: string, reason: string) => {
+      if (expectedRevision !== activeContext.revision) return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: activeContext.revision } satisfies CommandResult;
+      const current = activeContext.placements[0] ?? placementView();
+      const placement = { ...current, shelf_id: shelfId, x: 4, facings_x: 4, stocked_unit_count: 4, geometry: { ...current.geometry, display_width: 228 } };
+      const revision = activeContext.revision + 1;
+      const changeSetId = `change_${String(revision).padStart(4, '0')}`;
+      activeContext = { ...activeContext, revision, placements: [placement], latest_change_set_id: changeSetId, latest_undoable_change_set_id: changeSetId };
+      return {
+        ...appliedResult(revision, actor, reason, changeSetId),
+        affected_ids: [placement.id],
+        change_set: {
+          id: changeSetId,
+          actor,
+          reason,
+          base_revision: revision - 1,
+          resulting_revision: revision,
+          operations: [{
+            type: 'reflow_placement',
+            placement_id: placement.id,
+            before: { shelf_id: current.shelf_id, x: current.x, facings_x: current.facings_x, facings_y: current.facings_y, facings_z: current.facings_z },
+            after: { shelf_id: placement.shelf_id, x: placement.x, facings_x: placement.facings_x, facings_y: placement.facings_y, facings_z: placement.facings_z },
+          }],
+        },
+      };
     });
     engine = {
       context: vi.fn(() => activeContext),
@@ -184,8 +236,10 @@ describe('WebMCP site tools', () => {
       distribute_shelf_as,
       undo_change_set_as,
       preview_changes,
+      preview_shelf_allocation,
       clear_proposal_preview: vi.fn(),
       apply_changes_as,
+      apply_shelf_allocation_as,
     } as unknown as WasmEngine;
     registered = [];
     Object.defineProperty(document, 'modelContext', {
@@ -202,12 +256,13 @@ describe('WebMCP site tools', () => {
     const registration = await registerPlanogramWebMcp(session, () => ({ kind: 'shelf', id: 'shelf_01' }));
 
     expect(registration.status).toBe('ready');
-    expect(registration.registeredNames).toHaveLength(10);
+    expect(registration.registeredNames).toHaveLength(11);
     expect(registered.every(tool => tool.inputSchema.additionalProperties === false)).toBe(true);
     expect(toolByName(registered, 'planogram.get_planogram_context').annotations?.readOnlyHint).toBe(true);
     expect(toolByName(registered, 'planogram.validate_planogram').annotations?.readOnlyHint).toBe(true);
     expect(toolByName(registered, 'planogram.add_product').annotations).toBeUndefined();
     expect(toolByName(registered, 'planogram.distribute_shelf').annotations).toBeUndefined();
+    expect(toolByName(registered, 'planogram.preview_shelf_allocation').annotations?.readOnlyHint).toBe(true);
     expect(toolByName(registered, 'planogram.preview_changes').annotations?.readOnlyHint).toBe(true);
     expect(toolByName(registered, 'planogram.apply_changes').annotations).toBeUndefined();
   });
@@ -227,7 +282,7 @@ describe('WebMCP site tools', () => {
     await registerPlanogramWebMcp(session, () => undefined);
     const signal = new AbortController().signal;
     const contextResult = await toolByName(registered, 'planogram.get_planogram_context').execute({}, { signal });
-    expect(contextResult).toMatchObject({ status: 'ok', revision: 0, fixture: { width_sixteenths: 768 }, selection: null });
+    expect(contextResult).toMatchObject({ status: 'ok', revision: 0, fixture: { width_sixteenths: 768 }, selection: null, summary: { latest_change_set_id: null, latest_undoable_change_set_id: null } });
 
     const searchResult = await toolByName(registered, 'planogram.search_products').execute({ query: 'jif 16 oz' }, { signal });
     expect(searchResult).toMatchObject({
@@ -278,6 +333,9 @@ describe('WebMCP site tools', () => {
       change_set: { actor: 'webmcp', reason: 'Agent assortment pass', operations: [{ type: 'add_placement', placement: { x_sixteenths: 0, facings_x: 3, facings_z: 4 } }] },
     });
     expect((engine.add_placement_as as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('version_draft_01', 'jif_creamy_16', 'shelf_01', 0, 'webmcp', 'Agent assortment pass');
+    expect(await toolByName(registered, 'planogram.get_planogram_context').execute({}, { signal })).toMatchObject({
+      summary: { latest_change_set_id: 'change_0001', latest_undoable_change_set_id: 'change_0001' },
+    });
 
     const staleResult = await toolByName(registered, 'planogram.add_product').execute({ product_id: 'jif_creamy_16', shelf_id: 'shelf_01', expected_revision: 0 }, { signal });
     expect(staleResult).toMatchObject({ status: 'revision_conflict', expected_revision: 0, current_revision: 1 });
@@ -288,6 +346,9 @@ describe('WebMCP site tools', () => {
     const undoResult = await toolByName(registered, 'planogram.undo_change_set').execute({ change_set_id: 'change_0001', expected_revision: 1 }, { signal });
     expect(undoResult).toMatchObject({ status: 'applied', revision: 2, change_set: { actor: 'webmcp' } });
     expect(activeContext.placements).toHaveLength(0);
+    expect(await toolByName(registered, 'planogram.get_planogram_context').execute({}, { signal })).toMatchObject({
+      summary: { latest_change_set_id: 'change_0002', latest_undoable_change_set_id: null },
+    });
   });
 
   it('returns a structured cancellation without invoking a command', async () => {
@@ -317,6 +378,35 @@ describe('WebMCP site tools', () => {
     const applied = await tool.execute({ shelf_id: 'shelf_01', distribution: 'space_evenly', expected_revision: 4, reason: 'Balance the shelf' });
     expect(applied).toMatchObject({ status: 'applied', revision: 5, affected_ids: ['placement_0001', 'placement_0002'] });
     expect((engine.distribute_shelf_as as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('version_draft_01', 'shelf_01', 'space_evenly', 4, 'webmcp', 'Balance the shelf');
+  });
+
+  it('previews and applies Rust-owned shelf-facing allocation without model-supplied coordinates', async () => {
+    activeContext = { ...activeContext, revision: 4, placements: [placementView('placement_0001', 'shelf_01', 0)] };
+    const session = new PlanogramSession(engine, { onContext: vi.fn(), onCommand: vi.fn() });
+    await registerPlanogramWebMcp(session, () => undefined);
+    const tool = toolByName(registered, 'planogram.preview_shelf_allocation');
+
+    const invalid = await tool.execute({ shelf_id: 'shelf_01', strategy: 'invent_positions', expected_revision: 4 });
+    expect(invalid).toMatchObject({ status: 'error', code: 'invalid_input', revision: 4 });
+    expect((engine.preview_shelf_allocation as unknown as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+
+    const preview = await tool.execute({ shelf_id: 'shelf_01', strategy: 'fill_evenly', expected_revision: 4, reason: 'Fill the shelf evenly' });
+    expect(preview).toMatchObject({
+      status: 'ready',
+      revision: 4,
+      proposal_id: 'proposal_0001',
+      operations: [{
+        type: 'reflow_placement',
+        before: { x_sixteenths: 0, facings_x: 3 },
+        after: { x_sixteenths: 4, facings_x: 4 },
+      }],
+    });
+    expect(activeContext.revision).toBe(4);
+    expect((engine.preview_shelf_allocation as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('version_draft_01', 'shelf_01', 'fill_evenly', 4);
+
+    const apply = await toolByName(registered, 'planogram.apply_changes').execute({ proposal_id: 'proposal_0001', expected_revision: 4 });
+    expect(apply).toMatchObject({ status: 'applied', revision: 5, change_set: { actor: 'webmcp', reason: 'Fill the shelf evenly', operations: [{ type: 'reflow_placement' }] } });
+    expect((engine.apply_shelf_allocation_as as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('version_draft_01', 'shelf_01', 'fill_evenly', 4, 'webmcp', 'Fill the shelf evenly');
   });
 
   it('rejects model-supplied final coordinates in favor of semantic sequence', async () => {

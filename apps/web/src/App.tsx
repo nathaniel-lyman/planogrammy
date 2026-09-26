@@ -87,6 +87,18 @@ function proposalOperationLabel(operation: unknown, products: Product[], placeme
     }
     return `Move ${label}`;
   }
+  if (operation.type === 'reflow_placement') {
+    const before = isRecord(operation.before) ? operation.before : undefined;
+    const after = isRecord(operation.after) ? operation.after : undefined;
+    const existing = placements.find(candidate => candidate.id === operation.placement_id);
+    const label = existing ? proposalProductName(existing.product_id, products, existing.id) : String(operation.placement_id ?? 'placement');
+    if (before && after) {
+      const beforeFacings = typeof before.facings_x === 'number' ? before.facings_x : 1;
+      const afterFacings = typeof after.facings_x === 'number' ? after.facings_x : 1;
+      return `Reflow ${label} from ${beforeFacings} to ${afterFacings} horizontal facings`;
+    }
+    return `Reflow ${label}`;
+  }
   return `Apply ${operation.type.replaceAll('_', ' ')}`;
 }
 
@@ -105,6 +117,11 @@ function proposalOperationMeta(operation: unknown, products: Product[]) {
   }
   if (operation.type === 'move_placement' && isRecord(operation.after)) {
     return `New position ${formatImperial(typeof operation.after.x === 'number' ? operation.after.x : 0)}`;
+  }
+  if (operation.type === 'reflow_placement' && isRecord(operation.before) && isRecord(operation.after)) {
+    const beforeX = typeof operation.before.x === 'number' ? operation.before.x : 0;
+    const afterX = typeof operation.after.x === 'number' ? operation.after.x : 0;
+    return `Position ${formatImperial(beforeX)} → ${formatImperial(afterX)}`;
   }
 }
 
@@ -466,9 +483,9 @@ export function App() {
 
   const undo = () => {
     const session = sessionRef.current;
-    if (!session || !context?.latest_change_set_id) return;
+    if (!session || !context?.latest_undoable_change_set_id) return;
     setCommand('working');
-    session.undoChangeSet({ versionId: context.version_id, changeSetId: context.latest_change_set_id, expectedRevision: context.revision }, 'human');
+    session.undoChangeSet({ versionId: context.version_id, changeSetId: context.latest_undoable_change_set_id, expectedRevision: context.revision }, 'human');
   };
 
   const acceptProposal = () => {
@@ -522,7 +539,7 @@ export function App() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark" aria-hidden="true">P</span><strong>Planogrammy</strong><span className="document-title">4' Standard Bay</span></div>
         <nav aria-label="Editor controls" className="toolbar">
-          <button onClick={undo} disabled={!context?.latest_change_set_id} title="Undo last change"><Undo2 size={17}/>Undo</button>
+          <button onClick={undo} disabled={!context?.latest_undoable_change_set_id} title="Undo last active change"><Undo2 size={17}/>Undo</button>
           <button onClick={fitFixture}><Focus size={17}/>Fit fixture</button>
           <span className="toolbar-divider"/>
           <button className="icon-button" onClick={() => changeZoom(0.9)} aria-label="Zoom out"><Minus size={17}/></button>

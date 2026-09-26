@@ -36,6 +36,15 @@ function readyPreview(revision: number): Extract<PreviewResult, { status: 'ready
 function makeHarness(startingRevision = 0, startingContext?: EngineContext) {
   let context = startingContext ?? makeContext(startingRevision);
   const preview_changes = vi.fn((): PreviewResult => readyPreview(context.revision));
+  const preview_shelf_allocation = vi.fn((): PreviewResult => ({
+    ...readyPreview(context.revision),
+    operations: [{
+      type: 'reflow_placement',
+      placement_id: 'placement_0001',
+      before: { shelf_id: 'shelf_01', x: 0, facings_x: 1, facings_y: 1, facings_z: 1 },
+      after: { shelf_id: 'shelf_01', x: 4, facings_x: 4, facings_y: 1, facings_z: 1 },
+    }],
+  }));
   const clear_proposal_preview = vi.fn();
   const apply_changes_as = vi.fn((_versionId: string, expectedRevision: number, _operations: unknown[], actor: string, reason: string): CommandResult => {
     if (expectedRevision !== context.revision) {
@@ -53,11 +62,29 @@ function makeHarness(startingRevision = 0, startingContext?: EngineContext) {
       scene_patch: { revision, shelves: [], placements: [], removed_placement_ids: [] },
     };
   });
+  const apply_shelf_allocation_as = vi.fn((_versionId: string, _shelfId: string, _strategy: string, expectedRevision: number, actor: string, reason: string): CommandResult => {
+    if (expectedRevision !== context.revision) {
+      return { status: 'revision_conflict', expected_revision: expectedRevision, current_revision: context.revision };
+    }
+    const revision = context.revision + 1;
+    const changeSetId = `change_${String(revision).padStart(4, '0')}`;
+    context = { ...context, revision, latest_change_set_id: changeSetId };
+    return {
+      status: 'applied',
+      revision,
+      change_set: { id: changeSetId, actor, reason, base_revision: revision - 1, resulting_revision: revision, operations: [] },
+      affected_ids: ['placement_0001'],
+      validation: { issues: [] },
+      scene_patch: { revision, shelves: [], placements: [], removed_placement_ids: [] },
+    };
+  });
   const engine = {
     context: vi.fn(() => context),
     preview_changes,
+    preview_shelf_allocation,
     clear_proposal_preview,
     apply_changes_as,
+    apply_shelf_allocation_as,
   } as unknown as WasmEngine;
   const observers: SessionObservers = {
     onContext: vi.fn(),
@@ -65,7 +92,7 @@ function makeHarness(startingRevision = 0, startingContext?: EngineContext) {
     onProposal: vi.fn(),
     onProposalApplied: vi.fn(),
   };
-  return { engine, observers, preview_changes, clear_proposal_preview, apply_changes_as };
+  return { engine, observers, preview_changes, preview_shelf_allocation, clear_proposal_preview, apply_changes_as, apply_shelf_allocation_as };
 }
 
 function preview(session: PlanogramSession, reason: string) {
@@ -73,6 +100,25 @@ function preview(session: PlanogramSession, reason: string) {
 }
 
 describe('PlanogramSession proposal lifecycle', () => {
+  it('keeps shelf allocation semantic through preview and apply', () => {
+    const harness = makeHarness();
+    const session = new PlanogramSession(harness.engine, harness.observers);
+
+    const proposal = session.previewShelfAllocation({
+      versionId: 'version_draft_01',
+      shelfId: 'shelf_01',
+      strategy: 'fill_evenly',
+      expectedRevision: 0,
+      reason: 'Fill the shelf evenly',
+    });
+    expect(proposal).toMatchObject({ status: 'ready', proposal_id: 'proposal_0001', operations: [{ type: 'reflow_placement' }] });
+    expect(harness.preview_shelf_allocation).toHaveBeenCalledWith('version_draft_01', 'shelf_01', 'fill_evenly', 0);
+
+    expect(session.applyChanges({ versionId: 'version_draft_01', proposalId: 'proposal_0001', expectedRevision: 0 }, 'webmcp')).toMatchObject({ status: 'applied', revision: 1 });
+    expect(harness.apply_shelf_allocation_as).toHaveBeenCalledWith('version_draft_01', 'shelf_01', 'fill_evenly', 0, 'webmcp', 'Fill the shelf evenly');
+    expect(harness.apply_changes_as).not.toHaveBeenCalled();
+  });
+
   it.each(['human', 'webmcp'] as const)('records the actual %s approval actor', (source: ProposalApprovalSource) => {
     const harness = makeHarness();
     const session = new PlanogramSession(harness.engine, harness.observers);

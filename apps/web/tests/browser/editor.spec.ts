@@ -44,6 +44,15 @@ test('loads the complete fixture and supports accessible command paths', async (
   await page.getByRole('button', { name: 'Undo' }).click();
   await expect(elevation).toHaveValue('4\' 7"');
   await expect(page.getByText('Revision 4 · All changes local')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(elevation).toHaveValue('4\' 6"');
+  await expect(page.getByText('Revision 5 · All changes local')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(elevation).toHaveValue('4\'');
+  await expect(page.getByText('Revision 6 · All changes local')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled();
 });
 
 test('shows the explicit unsupported state without WebGPU', async ({ browser }) => {
@@ -155,7 +164,7 @@ test('registers site tools and applies the first WebMCP write through the live p
   const unsupported = page.getByRole('heading', { name: 'WebGPU is required' });
   await page.waitForFunction(() => document.querySelector('.shelf-list button') || document.querySelector('.unsupported'));
   test.skip(await unsupported.isVisible(), 'The test browser does not expose WebGPU.');
-  await page.waitForFunction(() => ((window as Window & { __planogramSiteTools?: unknown[] }).__planogramSiteTools?.length ?? 0) === 10);
+  await page.waitForFunction(() => ((window as Window & { __planogramSiteTools?: unknown[] }).__planogramSiteTools?.length ?? 0) === 11);
   await expect(page.getByText('Site tools ready')).toBeVisible();
   const toolNames = await page.evaluate(() => (window as Window & { __planogramSiteTools: Array<{ name: string }> }).__planogramSiteTools.map(tool => tool.name));
   expect(toolNames).toEqual([
@@ -167,6 +176,7 @@ test('registers site tools and applies the first WebMCP write through the live p
     'planogram.add_product',
     'planogram.distribute_shelf',
     'planogram.undo_change_set',
+    'planogram.preview_shelf_allocation',
     'planogram.preview_changes',
     'planogram.apply_changes',
   ]);
@@ -244,7 +254,7 @@ test('previews a WebMCP proposal and records truthful human approval in the revi
   const unsupported = page.getByRole('heading', { name: 'WebGPU is required' });
   await page.waitForFunction(() => document.querySelector('.shelf-list button') || document.querySelector('.unsupported'));
   test.skip(await unsupported.isVisible(), 'The test browser does not expose WebGPU.');
-  await page.waitForFunction(() => ((window as Window & { __planogramSiteTools?: unknown[] }).__planogramSiteTools?.length ?? 0) === 10);
+  await page.waitForFunction(() => ((window as Window & { __planogramSiteTools?: unknown[] }).__planogramSiteTools?.length ?? 0) === 11);
 
   let previewResult: { status: string; proposal_id?: string; revision?: number };
   try {
@@ -283,6 +293,96 @@ test('previews a WebMCP proposal and records truthful human approval in the revi
   await expect(receipt.getByText('change_0001', { exact: true })).toBeVisible();
   await expect(receipt.getByText('2', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /Jif Creamy Peanut Butter.*at 0"/ })).toBeVisible();
+});
+
+test('fills a shelf through one semantic WebMCP proposal and undoes the atomic reflow', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, '__planogramSiteTools', { value: [], configurable: true, writable: true });
+    Object.defineProperty(document, 'modelContext', {
+      configurable: true,
+      value: {
+        registerTool: async (tool: unknown) => { (window as Window & { __planogramSiteTools: unknown[] }).__planogramSiteTools.push(tool); },
+        unregisterTool: async () => undefined,
+      },
+    });
+  });
+  await page.goto('/');
+  const unsupported = page.getByRole('heading', { name: 'WebGPU is required' });
+  await page.waitForFunction(() => document.querySelector('.shelf-list button') || document.querySelector('.unsupported'));
+  test.skip(await unsupported.isVisible(), 'The test browser does not expose WebGPU.');
+  await page.waitForFunction(() => ((window as Window & { __planogramSiteTools?: unknown[] }).__planogramSiteTools?.length ?? 0) === 11);
+
+  let setup: unknown;
+  try {
+    setup = await page.evaluate(async () => {
+      const tools = (window as Window & { __planogramSiteTools: Array<{ name: string; execute: (args: unknown) => Promise<unknown> }> }).__planogramSiteTools;
+      const preview = tools.find(tool => tool.name === 'planogram.preview_changes');
+      const apply = tools.find(tool => tool.name === 'planogram.apply_changes');
+      if (!preview || !apply) throw new Error('proposal tools were not registered');
+      const proposal = await preview.execute({
+        expected_revision: 0,
+        reason: 'Place all largest Jif products on the bottom shelf',
+        operations: [
+          { kind: 'add', product_id: 'jif_creamy_40', shelf_id: 'shelf_01', sequence: 0 },
+          { kind: 'add', product_id: 'jif_crunchy_40', shelf_id: 'shelf_01', sequence: 1 },
+          { kind: 'add', product_id: 'jif_natural_40', shelf_id: 'shelf_01', sequence: 2 },
+        ],
+      }) as { status: string; proposal_id?: string };
+      if (proposal.status !== 'ready' || !proposal.proposal_id) return proposal;
+      return await apply.execute({ proposal_id: proposal.proposal_id, expected_revision: 0 });
+    });
+  } catch (error) {
+    test.skip(true, `Headless WebGPU could not execute the allocation setup: ${String(error)}`);
+    return;
+  }
+  test.skip((setup as { status?: string }).status !== 'applied', 'Headless WebGPU could not execute the setup proposal.');
+
+  const allocation = await page.evaluate(async () => {
+    const tools = (window as Window & { __planogramSiteTools: Array<{ name: string; execute: (args: unknown) => Promise<unknown> }> }).__planogramSiteTools;
+    const tool = tools.find(candidate => candidate.name === 'planogram.preview_shelf_allocation');
+    if (!tool) throw new Error('preview_shelf_allocation site tool was not registered');
+    return await tool.execute({ shelf_id: 'shelf_01', strategy: 'fill_evenly', expected_revision: 1, reason: 'Fill that shelf evenly with facings' });
+  });
+  expect(allocation).toMatchObject({
+    status: 'ready',
+    revision: 1,
+    operations: [
+      { type: 'reflow_placement', after: { x_sixteenths: 4, facings_x: 4 } },
+      { type: 'reflow_placement', after: { x_sixteenths: 282, facings_x: 4 } },
+      { type: 'reflow_placement', after: { x_sixteenths: 560, facings_x: 3 } },
+    ],
+  });
+  await expect(page.getByText('Revision 1 · All changes local')).toBeVisible();
+  await expect(page.getByText('Proposal ready · 3 changes')).toBeVisible();
+  await expect(page.getByText(/Reflow Jif Creamy Peanut Butter.*from 1 to 4 horizontal facings/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Accept proposal' }).click();
+  await expect(page.getByText('Revision 2 · All changes local')).toBeVisible();
+  const filled = await page.evaluate(async () => {
+    const tools = (window as Window & { __planogramSiteTools: Array<{ name: string; execute: (args: unknown) => Promise<unknown> }> }).__planogramSiteTools;
+    const tool = tools.find(candidate => candidate.name === 'planogram.get_section');
+    if (!tool) throw new Error('get_section site tool was not registered');
+    return await tool.execute({ section_id: 'section_01' });
+  });
+  expect(filled).toMatchObject({ section: { shelves: expect.arrayContaining([{ id: 'shelf_01', placements: [
+    { x_sixteenths: 4, facings_x: 4 },
+    { x_sixteenths: 282, facings_x: 4 },
+    { x_sixteenths: 560, facings_x: 3 },
+  ] }]) } });
+
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(page.getByText('Revision 3 · All changes local')).toBeVisible();
+  const restored = await page.evaluate(async () => {
+    const tools = (window as Window & { __planogramSiteTools: Array<{ name: string; execute: (args: unknown) => Promise<unknown> }> }).__planogramSiteTools;
+    const tool = tools.find(candidate => candidate.name === 'planogram.get_section');
+    if (!tool) throw new Error('get_section site tool was not registered');
+    return await tool.execute({ section_id: 'section_01' });
+  });
+  expect(restored).toMatchObject({ section: { shelves: expect.arrayContaining([{ id: 'shelf_01', placements: [
+    { x_sixteenths: 0, facings_x: 1 },
+    { x_sixteenths: 70, facings_x: 1 },
+    { x_sixteenths: 140, facings_x: 1 },
+  ] }]) } });
 });
 
 test('enforces the product gap and distributes a shelf evenly as one undoable change', async ({ page }) => {

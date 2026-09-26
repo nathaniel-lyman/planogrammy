@@ -496,10 +496,11 @@ Tools operate on the currently open, authenticated editor session. Closing the p
 9. `set_facings` — update horizontal, vertical, or depth facings.
 10. `swap_product` — substitute one SKU while attempting to preserve location.
 11. `reflow_section` — close gaps and reorder deterministically under declared constraints.
-12. `apply_changes` — atomically apply a previously validated proposal.
-13. `create_version` — branch the current version.
-14. `compare_versions` — summarize additions, removals, moves, orientation changes, and facing changes.
-15. `undo_change_set` — reverse an eligible human or agent change set.
+12. `preview_shelf_allocation` — ask Rust to maximize and balance loose-product horizontal facings for a shelf while preserving stable order, tray presets, minimum gaps, and grid-aligned residual distribution; this is non-mutating.
+13. `apply_changes` — atomically apply a previously validated generic or semantic allocation proposal after recomputing it at the expected revision.
+14. `create_version` — branch the current version.
+15. `compare_versions` — summarize additions, removals, moves, orientation changes, and facing changes.
+16. `undo_change_set` — reverse an eligible human or agent change set.
 
 Avoid generic CRUD tools such as `update_placement` as the primary agent interface.
 

@@ -35,6 +35,7 @@ export interface EngineContext {
   products: Product[];
   placements: Placement[];
   latest_change_set_id?: string;
+  latest_undoable_change_set_id?: string;
 }
 
 export interface ProductPerformance {
@@ -118,6 +119,7 @@ export interface RenderScene {
 }
 
 export type ShelfDistribution = 'packed_left' | 'centered' | 'space_between' | 'space_evenly';
+export type ShelfAllocationStrategy = 'fill_evenly';
 
 export interface ChangeSet {
   id: string;
@@ -176,8 +178,10 @@ export interface WasmEngine {
   add_placement_as(versionId: string, productId: string, shelfId: string, expectedRevision: number, actor: string, reason: string): CommandResult;
   remove_placement(versionId: string, placementId: string, expectedRevision: number, reason: string): CommandResult;
   preview_changes(versionId: string, expectedRevision: number, changes: PlacementChange[]): PreviewResult;
+  preview_shelf_allocation(versionId: string, shelfId: string, strategy: ShelfAllocationStrategy, expectedRevision: number): PreviewResult;
   clear_proposal_preview(): void;
   apply_changes_as(versionId: string, expectedRevision: number, changes: PlacementChange[], actor: string, reason: string): CommandResult;
+  apply_shelf_allocation_as(versionId: string, shelfId: string, strategy: ShelfAllocationStrategy, expectedRevision: number, actor: string, reason: string): CommandResult;
   undo_change_set(versionId: string, changeSetId: string, expectedRevision: number): CommandResult;
   undo_change_set_as(versionId: string, changeSetId: string, expectedRevision: number, actor: string): CommandResult;
   resize(width: number, height: number): void;

@@ -11,7 +11,7 @@ import {
   type RemovalSource,
   type UndoSource,
 } from './commands';
-import type { CommandResult, EngineContext, Placement, PlacementChange, PlanogramValidationResult, PreviewResult, Selection, Shelf, ShelfDistribution, WasmEngine } from './types';
+import type { CommandResult, EngineContext, Placement, PlacementChange, PlanogramValidationResult, PreviewResult, Selection, Shelf, ShelfAllocationStrategy, ShelfDistribution, WasmEngine } from './types';
 
 export type SessionSource = MoveSource | AddPlacementSource | DistributionSource | RemovalSource | UndoSource;
 export type ProposalApprovalSource = 'human' | 'webmcp';
@@ -40,13 +40,23 @@ export interface SessionObservers {
   onProposalApplied?: (result: Extract<CommandResult, { status: 'applied' }>, source: ProposalApprovalSource) => void;
 }
 
+type ActiveProposal = {
+  id: string;
+  versionId: string;
+  baseRevision: number;
+  reason: string;
+} & (
+  | { kind: 'placement_changes'; operations: PlacementChange[] }
+  | { kind: 'shelf_allocation'; shelfId: string; strategy: ShelfAllocationStrategy }
+);
+
 /**
  * The live page session is the single browser-side command/query seam. React
  * and WebMCP both use this object, while the Wasm engine remains authoritative
  * for geometry, validation, revisions, and scene patches.
  */
 export class PlanogramSession {
-  private activeProposal?: { id: string; versionId: string; baseRevision: number; operations: PlacementChange[]; reason: string };
+  private activeProposal?: ActiveProposal;
   private nextProposal = 1;
 
   constructor(
@@ -115,7 +125,28 @@ export class PlanogramSession {
     if (result.status !== 'ready') return result;
     const proposalId = `proposal_${String(this.nextProposal++).padStart(4, '0')}`;
     const reason = input.reason?.trim() || 'WebMCP placement proposal';
-    this.activeProposal = { id: proposalId, versionId: input.versionId, baseRevision: result.revision, operations: input.operations, reason };
+    this.activeProposal = { id: proposalId, versionId: input.versionId, baseRevision: result.revision, operations: input.operations, reason, kind: 'placement_changes' };
+    const summary = proposalSummary(result.operations);
+    const impact = proposalImpact(this.context(), result);
+    this.observers.onProposal?.({ id: proposalId, revision: result.revision, reason, operationCount: result.operations.length, summary, operations: result.operations, impact });
+    return { ...result, proposal_id: proposalId, reason };
+  }
+
+  previewShelfAllocation(input: { versionId: string; shelfId: string; strategy: ShelfAllocationStrategy; expectedRevision: number; reason?: string }): SessionPreviewResult {
+    this.clearActiveProposal();
+    const result = this.engine.preview_shelf_allocation(input.versionId, input.shelfId, input.strategy, input.expectedRevision);
+    if (result.status !== 'ready') return result;
+    const proposalId = `proposal_${String(this.nextProposal++).padStart(4, '0')}`;
+    const reason = input.reason?.trim() || 'WebMCP shelf allocation proposal';
+    this.activeProposal = {
+      id: proposalId,
+      versionId: input.versionId,
+      baseRevision: result.revision,
+      reason,
+      kind: 'shelf_allocation',
+      shelfId: input.shelfId,
+      strategy: input.strategy,
+    };
     const summary = proposalSummary(result.operations);
     const impact = proposalImpact(this.context(), result);
     this.observers.onProposal?.({ id: proposalId, revision: result.revision, reason, operationCount: result.operations.length, summary, operations: result.operations, impact });
@@ -133,13 +164,22 @@ export class PlanogramSession {
     if (input.expectedRevision !== proposal.baseRevision) {
       return { status: 'revision_conflict', expected_revision: input.expectedRevision, current_revision: this.context().revision };
     }
-    const result = this.run(source, () => this.engine.apply_changes_as(
-      input.versionId,
-      input.expectedRevision,
-      proposal.operations,
-      source,
-      proposal.reason,
-    ));
+    const result = this.run(source, () => proposal.kind === 'placement_changes'
+      ? this.engine.apply_changes_as(
+        input.versionId,
+        input.expectedRevision,
+        proposal.operations,
+        source,
+        proposal.reason,
+      )
+      : this.engine.apply_shelf_allocation_as(
+        input.versionId,
+        proposal.shelfId,
+        proposal.strategy,
+        input.expectedRevision,
+        source,
+        proposal.reason,
+      ));
     if (result.status === 'applied') {
       this.observers.onProposalApplied?.(result, source);
     }
@@ -168,14 +208,14 @@ export class PlanogramSession {
 }
 
 function proposalSummary(operations: unknown[]): string {
-  const counts = operations.reduce<{ add: number; move: number; remove: number }>((summary, operation) => {
+  const counts = operations.reduce<{ add: number; move: number; reflow: number; remove: number }>((summary, operation) => {
     if (!operation || typeof operation !== 'object') return summary;
     const type = 'type' in operation ? String(operation.type).replace('_placement', '') : 'kind' in operation ? String(operation.kind) : '';
-    if (type === 'add' || type === 'move' || type === 'remove') summary[type] += 1;
+    if (type === 'add' || type === 'move' || type === 'reflow' || type === 'remove') summary[type] += 1;
     return summary;
-  }, { add: 0, move: 0, remove: 0 });
-  return (['add', 'move', 'remove'] as const)
-    .map(kind => `${counts[kind]} ${kind === 'add' ? 'addition' : kind === 'remove' ? 'removal' : kind}${counts[kind] === 1 ? '' : 's'}`)
+  }, { add: 0, move: 0, reflow: 0, remove: 0 });
+  return (['add', 'move', 'reflow', 'remove'] as const)
+    .map(kind => `${counts[kind]} ${kind === 'add' ? 'addition' : kind === 'remove' ? 'removal' : kind === 'reflow' ? 'facing update' : kind}${counts[kind] === 1 ? '' : 's'}`)
     .join(' · ');
 }
 

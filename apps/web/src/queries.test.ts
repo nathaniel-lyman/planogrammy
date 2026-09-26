@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getSection, searchProducts, toToolPlacement, toToolProduct } from './queries';
+import { getPlanogramContext, getSection, searchProducts, toToolOperation, toToolPlacement, toToolProduct } from './queries';
 import type { EngineContext, Placement, Product } from './types';
 
 const trayProduct: Product = {
@@ -88,6 +88,20 @@ function availableCapacity(placements: Placement[], shelfWidth = 768): number {
 }
 
 describe('catalog query transport', () => {
+  it('distinguishes the audit-log tail from the next undoable change', () => {
+    const context = {
+      ...contextWithPlacements([]),
+      revision: 3,
+      latest_change_set_id: 'change_0003',
+      latest_undoable_change_set_id: 'change_0001',
+    };
+
+    expect(getPlanogramContext(context, undefined).summary).toMatchObject({
+      latest_change_set_id: 'change_0003',
+      latest_undoable_change_set_id: 'change_0001',
+    });
+  });
+
   it('keeps exact metrics and explicitly names sixteenth-inch tray dimensions', () => {
     expect(toToolProduct(trayProduct)).toMatchObject({
       net_weight_ounces_hundredths: 1600,
@@ -120,6 +134,20 @@ describe('catalog query transport', () => {
 });
 
 describe('Rust-derived placement geometry in queries', () => {
+  it('transports a Rust-resolved reflow with explicit before and after facings', () => {
+    expect(toToolOperation({
+      type: 'reflow_placement',
+      placement_id: 'placement_0001',
+      before: { shelf_id: 'shelf_01', x: 0, facings_x: 1, facings_y: 1, facings_z: 1 },
+      after: { shelf_id: 'shelf_01', x: 4, facings_x: 4, facings_y: 1, facings_z: 1 },
+    })).toEqual({
+      type: 'reflow_placement',
+      placement_id: 'placement_0001',
+      before: { shelf_id: 'shelf_01', x_sixteenths: 0, facings_x: 1, facings_y: 1, facings_z: 1 },
+      after: { shelf_id: 'shelf_01', x_sixteenths: 4, facings_x: 4, facings_y: 1, facings_z: 1 },
+    });
+  });
+
   it('transports the resolved footprint and uses it for contiguous shelf capacity', () => {
     const trayPlacement = placement();
     const loosePlacement = placement({

@@ -400,7 +400,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.undo_change_set',
       title: 'Undo planogram change',
-      description: 'Reverses one eligible change set in the open draft using the current expected revision and records a compensating change set.',
+      description: 'Reverses the latest active change set in the open draft using the current expected revision and records a compensating change set. Read latest_undoable_change_set_id from planogram.get_planogram_context; consecutive undos walk backward through active history.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -410,6 +410,24 @@ function schemas(): SiteToolDefinition[] {
         required: ['change_set_id', 'expected_revision'],
         additionalProperties: false,
       },
+      execute: () => undefined,
+    },
+    {
+      name: 'planogram.preview_shelf_allocation',
+      title: 'Preview shelf-facing allocation',
+      description: 'Builds a read-only Rust-resolved shelf allocation proposal. The fill_evenly strategy maximizes loose-product horizontal facings, balances facing counts as evenly as capacity permits, preserves stable current left-to-right order, keeps loaded trays at their fixed catalog presets, and distributes residual shelf slack evenly. Rust validates the complete result without changing the draft.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          shelf_id: { type: 'string', maxLength: 120 },
+          strategy: { type: 'string', enum: ['fill_evenly'] },
+          expected_revision: { type: 'integer', minimum: 0 },
+          reason: { type: 'string', maxLength: 240 },
+        },
+        required: ['shelf_id', 'strategy', 'expected_revision'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true },
       execute: () => undefined,
     },
     {
@@ -432,7 +450,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.apply_changes',
       title: 'Apply reviewed planogram proposal',
-      description: 'Applies one proposal previously returned by planogram.preview_changes. The proposal is revalidated at the supplied revision and commits as one atomic WebMCP change set, or changes nothing.',
+      description: 'Applies one proposal previously returned by planogram.preview_changes or planogram.preview_shelf_allocation. The semantic proposal is recomputed and revalidated at the supplied revision, then commits as one atomic WebMCP change set or changes nothing.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -449,7 +467,7 @@ function schemas(): SiteToolDefinition[] {
 
 function bindTools(session: PlanogramSession, getSelection: () => Selection | undefined): SiteToolDefinition[] {
   const tools = schemas();
-  const [contextTool, searchTool, productTool, sectionTool, validationTool, addTool, distributeTool, undoTool, previewTool, applyTool] = tools;
+  const [contextTool, searchTool, productTool, sectionTool, validationTool, addTool, distributeTool, undoTool, allocationPreviewTool, previewTool, applyTool] = tools;
   contextTool.execute = (_args, executionContext) => {
     const context = session.context();
     if (requestWasCancelled(executionContext)) return cancelled(context.revision);
@@ -546,6 +564,30 @@ function bindTools(session: PlanogramSession, getSelection: () => Selection | un
       expectedRevision,
       reason,
     }, 'webmcp'), session);
+  };
+  allocationPreviewTool.execute = (args, executionContext) => {
+    const context = session.context();
+    if (requestWasCancelled(executionContext)) return cancelled(context.revision);
+    const argumentError = validateArguments(args, ['shelf_id', 'strategy', 'expected_revision', 'reason'], context.revision);
+    if (argumentError) return argumentError;
+    const shelfId = readRequiredString(args, 'shelf_id', 120, context.revision);
+    if (typeof shelfId !== 'string') return shelfId;
+    const strategy = readRequiredString(args, 'strategy', 40, context.revision);
+    if (typeof strategy !== 'string') return strategy;
+    if (strategy !== 'fill_evenly') {
+      return { status: 'error', code: 'invalid_input', message: 'strategy must be fill_evenly.', revision: context.revision } satisfies ToolError;
+    }
+    const expectedRevision = readRequiredRevision(args, context.revision);
+    if (typeof expectedRevision !== 'number') return expectedRevision;
+    const reason = readOptionalString(args, 'reason', 240, context.revision);
+    if (typeof reason !== 'string' && reason !== undefined) return reason;
+    return previewResult(session.previewShelfAllocation({
+      versionId: context.version_id,
+      shelfId,
+      strategy,
+      expectedRevision,
+      reason,
+    }), session);
   };
   previewTool.execute = (args, executionContext) => {
     const context = session.context();

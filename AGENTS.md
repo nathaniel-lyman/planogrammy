@@ -22,6 +22,8 @@ All adjustable-shelf movement uses whole-inch increments: 16 internal units. Arr
 
 Product x positions use 1/8-inch increments: 2 internal units. Distinct product placements on the same shelf must keep at least a 1/8-inch gap. Rust owns packing and shelf distribution; supported shelf layouts are packed left, centered, space between, and space evenly. Distribution preserves stable left-to-right placement order, applies atomically as one revision/change set, and never lets React or WebMCP calculate final coordinates.
 
+Shelf-facing allocation is also a semantic Rust-owned operation. The `fill_evenly` strategy resets loose products to one horizontal facing, repeatedly gives the next facing to the lowest-count loose placement that still fits using stable left-to-right order as the tie-breaker, preserves loaded-tray presets, and then distributes residual slack with the existing space-evenly resolver. Preview and apply must resolve from the same semantic shelf-and-strategy intent at the expected revision; the complete reflow commits as one change set and undo restores every exact prior position and facing count.
+
 The representative catalog contains 22 peanut-butter SKUs. Every product exposes its existing authoritative depth plus exact net weight in hundredths of an ounce, sales cents per store per week, unit milliunits per store per week, gross-margin basis points, and casepack quantity. Performance uses `period = "Trailing 13 weeks"` and the source label `Synthetic representative 13-week average; not retailer actuals`; do not present it as live retailer data or store these values as floating point.
 
 Five products use a loaded tray configuration: `jif_creamy_16`, `skippy_creamy_16`, `peter_pan_creamy_16`, `smuckers_natural_16`, and `justins_classic_16`. The Rust fields are `outer_width`, `outer_height`, `outer_depth`, `front_lip_height`, `facings_x`, and `units_deep`; transport adapters add `_sixteenths` to the four `Length` values. These outer dimensions describe the loaded footprint. One loaded tray is one placement. Products without a tray configuration remain loose.
@@ -157,3 +159,5 @@ For catalog or tray changes, specifically prove:
 - Tray fit, collision, distribution, capacity, and proposal impact use the loaded tray footprint.
 - Explicit conflicting tray facings fail without geometry, revision, or history changes.
 - Catalog, inspector, accessible companion, and WebMCP product results agree on the metrics and tray configuration.
+
+For shelf-facing allocation, specifically prove preview is non-mutating, apply recomputes and validates the semantic intent in Rust, loose facing counts are as even as shelf capacity permits, no additional whole facing fits, residual slack is distributed on the 1/8-inch grid, loaded trays retain their presets, and one undo restores every exact prior configuration.

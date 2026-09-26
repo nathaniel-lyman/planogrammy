@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::ops::{Add, Sub};
 
 #[derive(
@@ -291,6 +292,21 @@ pub enum ShelfDistribution {
     SpaceEvenly,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShelfAllocationStrategy {
+    FillEvenly,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlacementConfiguration {
+    pub shelf_id: ShelfId,
+    pub x: Length,
+    pub facings_x: u32,
+    pub facings_y: u32,
+    pub facings_z: u32,
+}
+
 /// A model-generated placement intent. The model may choose shelf assignment
 /// and sequence; the domain resolves physical coordinates, checks fit/overlap,
 /// and applies the complete batch atomically.
@@ -318,6 +334,16 @@ pub enum PlacementChange {
         sequence: u32,
         resolved_x: Option<Length>,
     },
+    /// Internal domain-resolved shelf allocation. WebMCP callers express the
+    /// allocation strategy; Rust owns these exact facings and coordinates.
+    Reflow {
+        placement_id: PlacementId,
+        shelf_id: ShelfId,
+        resolved_x: Length,
+        facings_x: u32,
+        facings_y: u32,
+        facings_z: u32,
+    },
     Remove {
         placement_id: PlacementId,
     },
@@ -334,10 +360,18 @@ pub struct RemovePlacement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReflowPlacement {
+    pub placement_id: PlacementId,
+    pub before: PlacementConfiguration,
+    pub after: PlacementConfiguration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlanogramOperation {
     MoveShelf(MoveShelf),
     MovePlacement(MovePlacement),
+    ReflowPlacement(ReflowPlacement),
     AddPlacement(AddPlacement),
     RemovePlacement(RemovePlacement),
 }
@@ -530,6 +564,10 @@ enum RequestedPlacementOperation {
     Move {
         placement_id: PlacementId,
         before: PlacementLocation,
+    },
+    Reflow {
+        placement_id: PlacementId,
+        before: PlacementConfiguration,
     },
     Remove(Placement),
 }
@@ -1501,6 +1539,255 @@ impl DraftVersion {
         )
     }
 
+    pub fn preview_shelf_allocation(
+        &self,
+        version_id: &VersionId,
+        shelf_id: &ShelfId,
+        strategy: ShelfAllocationStrategy,
+        expected_revision: u64,
+    ) -> PreviewResult {
+        if version_id != &self.id {
+            return PreviewResult::NotFound {
+                entity: "version".into(),
+                id: version_id.0.clone(),
+            };
+        }
+        if expected_revision != self.revision {
+            return PreviewResult::RevisionConflict {
+                expected_revision,
+                current_revision: self.revision,
+            };
+        }
+        if !self.status.is_editable() {
+            return PreviewResult::Forbidden {
+                message: "This version is not editable.".into(),
+            };
+        }
+        let changes = match self.resolve_shelf_allocation(shelf_id, strategy) {
+            Ok(changes) => changes,
+            Err(CommandResult::ValidationFailed { validation, .. }) => {
+                return PreviewResult::ValidationFailed {
+                    revision: self.revision,
+                    validation,
+                };
+            }
+            Err(CommandResult::NotFound { entity, id }) => {
+                return PreviewResult::NotFound { entity, id };
+            }
+            Err(CommandResult::InvalidCommand { message }) => {
+                return PreviewResult::InvalidCommand { message };
+            }
+            Err(CommandResult::Forbidden { message }) => {
+                return PreviewResult::Forbidden { message };
+            }
+            Err(CommandResult::RevisionConflict {
+                expected_revision,
+                current_revision,
+            }) => {
+                return PreviewResult::RevisionConflict {
+                    expected_revision,
+                    current_revision,
+                };
+            }
+            Err(CommandResult::Applied { .. }) => {
+                return PreviewResult::InvalidCommand {
+                    message: "The shelf allocation could not be previewed.".into(),
+                };
+            }
+        };
+        self.preview_placement_changes(version_id, &changes, expected_revision)
+    }
+
+    pub fn apply_shelf_allocation_as(
+        &mut self,
+        version_id: &VersionId,
+        shelf_id: &ShelfId,
+        strategy: ShelfAllocationStrategy,
+        expected_revision: u64,
+        actor: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> CommandResult {
+        if version_id != &self.id {
+            return CommandResult::NotFound {
+                entity: "version".into(),
+                id: version_id.0.clone(),
+            };
+        }
+        if expected_revision != self.revision {
+            return CommandResult::RevisionConflict {
+                expected_revision,
+                current_revision: self.revision,
+            };
+        }
+        if !self.status.is_editable() {
+            return CommandResult::Forbidden {
+                message: "This version is not editable.".into(),
+            };
+        }
+        let changes = match self.resolve_shelf_allocation(shelf_id, strategy) {
+            Ok(changes) => changes,
+            Err(result) => return result,
+        };
+        self.apply_placement_changes_with_compensation(
+            version_id,
+            &changes,
+            expected_revision,
+            actor.into(),
+            reason.into(),
+            None,
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn resolve_shelf_allocation(
+        &self,
+        shelf_id: &ShelfId,
+        strategy: ShelfAllocationStrategy,
+    ) -> Result<Vec<PlacementChange>, CommandResult> {
+        let Some(shelf) = self.shelf(shelf_id).cloned() else {
+            return Err(CommandResult::NotFound {
+                entity: "shelf".into(),
+                id: shelf_id.0.clone(),
+            });
+        };
+        if shelf.kind == ShelfKind::BaseDeck {
+            return Err(CommandResult::ValidationFailed {
+                revision: self.revision,
+                validation: ValidationSummary {
+                    issues: vec![ValidationIssue {
+                        code: ValidationCode::PlacementOnFixedShelf,
+                        shelf_id: Some(shelf.id),
+                        message: "The base deck is fixed and cannot allocate product facings."
+                            .into(),
+                    }],
+                },
+            });
+        }
+
+        let mut ordered = self
+            .placements
+            .iter()
+            .filter(|placement| placement.shelf_id == *shelf_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        ordered.sort_by(|left, right| left.x.cmp(&right.x).then_with(|| left.id.cmp(&right.id)));
+        if ordered.is_empty() {
+            return Err(CommandResult::InvalidCommand {
+                message: "The selected shelf has no products to allocate.".into(),
+            });
+        }
+
+        let mut planned = Vec::with_capacity(ordered.len());
+        for mut placement in ordered {
+            let Some(product) = self
+                .products
+                .iter()
+                .find(|product| product.id == placement.product_id)
+                .cloned()
+            else {
+                return Err(CommandResult::NotFound {
+                    entity: "product".into(),
+                    id: placement.product_id.0.clone(),
+                });
+            };
+            let can_allocate_facings = product.tray.is_none();
+            if can_allocate_facings {
+                placement.facings_x = 1;
+            }
+            planned.push((placement, product, can_allocate_facings));
+        }
+        if !planned.iter().any(|(_, _, can_allocate)| *can_allocate) {
+            return Err(CommandResult::InvalidCommand {
+                message: "The selected shelf has no loose products whose facings can be allocated."
+                    .into(),
+            });
+        }
+
+        let shelf_width = i64::from(shelf.width.sixteenths());
+        let gap_width = i64::from(MIN_PLACEMENT_GAP.sixteenths())
+            * i64::try_from(planned.len().saturating_sub(1)).unwrap_or(i64::MAX);
+        let mut occupied = gap_width
+            + planned
+                .iter()
+                .map(|(placement, product, _)| {
+                    i64::from(Self::display_width(placement, product).sixteenths())
+                })
+                .sum::<i64>();
+        if occupied > shelf_width {
+            return Err(CommandResult::ValidationFailed {
+                revision: self.revision,
+                validation: ValidationSummary {
+                    issues: vec![ValidationIssue {
+                        code: ValidationCode::NoShelfCapacity,
+                        shelf_id: Some(shelf.id),
+                        message:
+                            "The shelf cannot fit one facing of every loose product plus its fixed trays."
+                                .into(),
+                    }],
+                },
+            });
+        }
+
+        match strategy {
+            ShelfAllocationStrategy::FillEvenly => loop {
+                let next = planned
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (placement, product, can_allocate))| {
+                        *can_allocate
+                            && placement.facings_x < 100
+                            && occupied + i64::from(product.dimensions.width.sixteenths())
+                                <= shelf_width
+                    })
+                    .min_by_key(|(index, (placement, _, _))| (placement.facings_x, *index))
+                    .map(|(index, _)| index);
+                let Some(index) = next else {
+                    break;
+                };
+                planned[index].0.facings_x += 1;
+                occupied += i64::from(planned[index].1.dimensions.width.sixteenths());
+            },
+        }
+
+        let widths = planned
+            .iter()
+            .map(|(placement, product, _)| Self::display_width(placement, product))
+            .collect::<Vec<_>>();
+        let positions =
+            resolve_shelf_distribution(&widths, shelf.width, ShelfDistribution::SpaceEvenly)
+                .expect("validated allocation fits its shelf");
+        let changes = planned
+            .into_iter()
+            .zip(positions)
+            .filter_map(|((placement, _, _), x)| {
+                let before = self
+                    .placement(&placement.id)
+                    .expect("planned placement exists");
+                if before.x == x
+                    && before.facings_x == placement.facings_x
+                    && before.facings_y == placement.facings_y
+                    && before.facings_z == placement.facings_z
+                {
+                    return None;
+                }
+                Some(PlacementChange::Reflow {
+                    placement_id: placement.id,
+                    shelf_id: shelf_id.clone(),
+                    resolved_x: x,
+                    facings_x: placement.facings_x,
+                    facings_y: placement.facings_y,
+                    facings_z: placement.facings_z,
+                })
+            })
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return Err(CommandResult::InvalidCommand {
+                message: "Products already use the requested shelf allocation.".into(),
+            });
+        }
+        Ok(changes)
+    }
+
     pub fn preview_placement_changes(
         &self,
         version_id: &VersionId,
@@ -1642,7 +1929,7 @@ impl DraftVersion {
             PlacementChange::Add { resolved_x, .. } | PlacementChange::Move { resolved_x, .. } => {
                 resolved_x.is_some()
             }
-            PlacementChange::Remove { .. } => true,
+            PlacementChange::Reflow { .. } | PlacementChange::Remove { .. } => true,
         });
 
         for change in changes {
@@ -1779,6 +2066,83 @@ impl DraftVersion {
                     push_unique(&mut touched_shelves, target_shelf.id.clone());
                     push_unique(&mut affected_ids, placement_id.0.clone());
                 }
+                PlacementChange::Reflow {
+                    placement_id,
+                    shelf_id,
+                    resolved_x,
+                    facings_x,
+                    facings_y,
+                    facings_z,
+                } => {
+                    if seen_placement_ids.iter().any(|id| id == placement_id) {
+                        return Err(CommandResult::InvalidCommand {
+                            message: format!(
+                                "Placement {} may only appear once in a proposal.",
+                                placement_id.0
+                            ),
+                        });
+                    }
+                    let Some(placement) = candidate.placement(placement_id).cloned() else {
+                        return Err(CommandResult::NotFound {
+                            entity: "placement".into(),
+                            id: placement_id.0.clone(),
+                        });
+                    };
+                    let Some(target_shelf) = candidate.shelf(shelf_id).cloned() else {
+                        return Err(CommandResult::NotFound {
+                            entity: "shelf".into(),
+                            id: shelf_id.0.clone(),
+                        });
+                    };
+                    if *facings_x == 0
+                        || *facings_y == 0
+                        || *facings_z == 0
+                        || *facings_x > 100
+                        || *facings_y > 100
+                        || *facings_z > 100
+                    {
+                        return Err(CommandResult::ValidationFailed {
+                            revision: self.revision,
+                            validation: ValidationSummary {
+                                issues: vec![ValidationIssue {
+                                    code: ValidationCode::InvalidFacingCount,
+                                    shelf_id: Some(shelf_id.clone()),
+                                    message: "A placement must have between 1 and 100 facings in every dimension.".into(),
+                                }],
+                            },
+                        });
+                    }
+                    let before = PlacementConfiguration {
+                        shelf_id: placement.shelf_id.clone(),
+                        x: placement.x,
+                        facings_x: placement.facings_x,
+                        facings_y: placement.facings_y,
+                        facings_z: placement.facings_z,
+                    };
+                    let target = candidate
+                        .placement_mut(placement_id)
+                        .expect("validated placement exists");
+                    target.shelf_id = shelf_id.clone();
+                    target.x = *resolved_x;
+                    target.facings_x = *facings_x;
+                    target.facings_y = *facings_y;
+                    target.facings_z = *facings_z;
+                    requested_operations.push(RequestedPlacementOperation::Reflow {
+                        placement_id: placement_id.clone(),
+                        before,
+                    });
+                    seen_placement_ids.push(placement_id.clone());
+                    remove_from_shelf_orders(&mut shelf_orders, placement_id);
+                    insert_shelf_order(
+                        &mut shelf_orders,
+                        &target_shelf.id,
+                        placement_id.clone(),
+                        u32::MAX,
+                    );
+                    push_unique(&mut touched_shelves, placement.shelf_id);
+                    push_unique(&mut touched_shelves, target_shelf.id);
+                    push_unique(&mut affected_ids, placement_id.0.clone());
+                }
                 PlacementChange::Remove { placement_id } => {
                     if seen_placement_ids.iter().any(|id| id == placement_id) {
                         return Err(CommandResult::InvalidCommand {
@@ -1903,6 +2267,7 @@ impl DraftVersion {
 
         let mut operations = Vec::with_capacity(changes.len() + candidate.placements.len());
         let mut requested_move_ids = Vec::new();
+        let mut requested_reflow_ids = Vec::new();
         for requested in requested_operations {
             match requested {
                 RequestedPlacementOperation::Add(id) => {
@@ -1938,6 +2303,35 @@ impl DraftVersion {
                         },
                     }));
                 }
+                RequestedPlacementOperation::Reflow {
+                    placement_id,
+                    before,
+                } => {
+                    let placement = candidate
+                        .placement(&placement_id)
+                        .expect("validated reflowed placement exists");
+                    let after = PlacementConfiguration {
+                        shelf_id: placement.shelf_id.clone(),
+                        x: placement.x,
+                        facings_x: placement.facings_x,
+                        facings_y: placement.facings_y,
+                        facings_z: placement.facings_z,
+                    };
+                    if before == after {
+                        return Err(CommandResult::InvalidCommand {
+                            message: format!(
+                                "Placement {} already uses the requested shelf allocation.",
+                                placement_id.0
+                            ),
+                        });
+                    }
+                    requested_reflow_ids.push(placement_id.clone());
+                    operations.push(PlanogramOperation::ReflowPlacement(ReflowPlacement {
+                        placement_id,
+                        before,
+                        after,
+                    }));
+                }
                 RequestedPlacementOperation::Remove(placement) => {
                     operations.push(PlanogramOperation::RemovePlacement(RemovePlacement {
                         placement,
@@ -1954,6 +2348,7 @@ impl DraftVersion {
                 continue;
             }
             if requested_move_ids.iter().any(|id| id == &placement.id)
+                || requested_reflow_ids.iter().any(|id| id == &placement.id)
                 || changes.iter().any(|change| {
                     matches!(
                         change,
@@ -2187,9 +2582,9 @@ impl DraftVersion {
                 id: change_set_id.0.clone(),
             };
         };
-        if self.change_sets.last().map(|change| &change.id) != Some(change_set_id) {
+        if self.latest_undoable_change_set_id() != Some(change_set_id) {
             return CommandResult::InvalidCommand {
-                message: "Only the latest change set is eligible for undo.".into(),
+                message: "Only the latest active change set is eligible for undo.".into(),
             };
         }
         if let Some(inverse) = inverse_placement_changes(&change_set.operations) {
@@ -2223,6 +2618,7 @@ impl DraftVersion {
                 )
             }
             Some(PlanogramOperation::MovePlacement(_))
+            | Some(PlanogramOperation::ReflowPlacement(_))
             | Some(PlanogramOperation::AddPlacement(_))
             | Some(PlanogramOperation::RemovePlacement(_)) => CommandResult::InvalidCommand {
                 message: "Change set has no reversible placement operation.".into(),
@@ -2235,6 +2631,19 @@ impl DraftVersion {
 
     pub fn latest_change_set_id(&self) -> Option<&ChangeSetId> {
         self.change_sets.last().map(|change| &change.id)
+    }
+
+    pub fn latest_undoable_change_set_id(&self) -> Option<&ChangeSetId> {
+        let compensated = self
+            .change_sets
+            .iter()
+            .filter_map(|change| change.compensates.clone())
+            .collect::<HashSet<_>>();
+        self.change_sets
+            .iter()
+            .rev()
+            .find(|change| change.compensates.is_none() && !compensated.contains(&change.id))
+            .map(|change| &change.id)
     }
 
     pub fn add_placement(
@@ -2695,6 +3104,14 @@ fn inverse_placement_changes(operations: &[PlanogramOperation]) -> Option<Vec<Pl
                     shelf_id: operation.before.shelf_id.clone(),
                     sequence: 0,
                     resolved_x: Some(operation.before.x),
+                },
+                PlanogramOperation::ReflowPlacement(operation) => PlacementChange::Reflow {
+                    placement_id: operation.placement_id.clone(),
+                    shelf_id: operation.before.shelf_id.clone(),
+                    resolved_x: operation.before.x,
+                    facings_x: operation.before.facings_x,
+                    facings_y: operation.before.facings_y,
+                    facings_z: operation.before.facings_z,
                 },
                 PlanogramOperation::AddPlacement(operation) => PlacementChange::Remove {
                     placement_id: operation.placement.id.clone(),
@@ -3357,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_rejects_non_latest_dependent_changes_atomically() {
+    fn undo_walks_backward_through_active_change_sets_and_preserves_history() {
         let mut draft = DraftVersion::default();
         let version = draft.id.clone();
         let first = draft.move_shelf(
@@ -3388,7 +3805,7 @@ mod tests {
         assert!(matches!(
             rejected,
             CommandResult::InvalidCommand { ref message }
-                if message == "Only the latest change set is eligible for undo."
+                if message == "Only the latest active change set is eligible for undo."
         ));
         assert_eq!(draft, before);
 
@@ -3402,10 +3819,25 @@ mod tests {
             draft.shelf(&shelf("shelf_03")).unwrap().elevation,
             Length::from_sixteenths(576)
         );
+        assert_eq!(draft.latest_undoable_change_set_id(), Some(&first_id));
+
+        let earlier = draft.undo_change_set(&version, &first_id, 3);
+        assert!(matches!(
+            earlier,
+            CommandResult::Applied { revision: 4, .. }
+        ));
+        assert_eq!(
+            draft.shelf(&shelf("shelf_02")).unwrap().elevation,
+            Length::from_sixteenths(384)
+        );
+        assert_eq!(draft.change_sets.len(), 4);
+        assert_eq!(draft.change_sets[2].compensates, Some(second_id));
+        assert_eq!(draft.change_sets[3].compensates, Some(first_id));
+        assert_eq!(draft.latest_undoable_change_set_id(), None);
     }
 
     #[test]
-    fn product_placement_is_first_fit_revisioned_and_only_latest_is_undoable() {
+    fn product_placement_is_first_fit_revisioned_and_only_latest_active_change_is_undoable() {
         let mut draft = DraftVersion::default();
         let version = draft.id.clone();
         let first = draft.add_placement(
@@ -4334,6 +4766,130 @@ mod tests {
 
         let undone = draft.undo_change_set(&version, &change_set_id, 4);
         assert!(matches!(undone, CommandResult::Applied { revision: 5, .. }));
+        assert_eq!(draft.placements, before);
+    }
+
+    #[test]
+    fn fill_evenly_allocates_facings_in_rust_previews_applies_and_undoes_atomically() {
+        let mut draft = DraftVersion::default();
+        let version = draft.id.clone();
+        let additions = ["jif_creamy_40", "jif_crunchy_40", "jif_natural_40"]
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, product_id)| PlacementChange::Add {
+                placement_id: None,
+                product_id: ProductId::new(product_id),
+                shelf_id: shelf("shelf_01"),
+                sequence: sequence as u32,
+                resolved_x: None,
+                facings_x: None,
+                facings_y: None,
+                facings_z: None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            draft.apply_placement_changes(&version, &additions, 0, "largest Jif assortment"),
+            CommandResult::Applied { revision: 1, .. }
+        ));
+        let before = draft.placements.clone();
+
+        let preview = draft.preview_shelf_allocation(
+            &version,
+            &shelf("shelf_01"),
+            ShelfAllocationStrategy::FillEvenly,
+            1,
+        );
+        match preview {
+            PreviewResult::Ready {
+                revision,
+                operations,
+                preview_scene,
+                ref validation,
+                ..
+            } => {
+                assert_eq!(revision, 1);
+                assert!(validation.valid());
+                assert_eq!(operations.len(), 3);
+                assert!(operations
+                    .iter()
+                    .all(|operation| matches!(operation, PlanogramOperation::ReflowPlacement(_))));
+                let proposed = preview_scene
+                    .placements
+                    .iter()
+                    .filter(|placement| placement.shelf_id == shelf("shelf_01"))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    proposed
+                        .iter()
+                        .map(|placement| placement.facings_x)
+                        .collect::<Vec<_>>(),
+                    vec![4, 4, 3]
+                );
+                assert_eq!(
+                    proposed
+                        .iter()
+                        .map(|placement| placement.x.sixteenths())
+                        .collect::<Vec<_>>(),
+                    vec![4, 282, 560]
+                );
+            }
+            result => panic!("unexpected preview: {result:?}"),
+        }
+        assert_eq!(draft.revision, 1);
+        assert_eq!(draft.placements, before);
+
+        let applied = draft.apply_shelf_allocation_as(
+            &version,
+            &shelf("shelf_01"),
+            ShelfAllocationStrategy::FillEvenly,
+            1,
+            "webmcp",
+            "Fill the bottom shelf evenly with facings",
+        );
+        let change_set_id = match applied {
+            CommandResult::Applied {
+                revision,
+                change_set,
+                ref scene_patch,
+                ..
+            } => {
+                assert_eq!(revision, 2);
+                assert_eq!(change_set.actor, "webmcp");
+                assert_eq!(change_set.operations.len(), 3);
+                assert_eq!(scene_patch.placements.len(), 3);
+                change_set.id
+            }
+            result => panic!("unexpected apply result: {result:?}"),
+        };
+        let allocated = draft
+            .placements
+            .iter()
+            .filter(|placement| placement.shelf_id == shelf("shelf_01"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            allocated
+                .iter()
+                .map(|placement| placement.facings_x)
+                .collect::<Vec<_>>(),
+            vec![4, 4, 3]
+        );
+        let occupied = allocated
+            .iter()
+            .map(|placement| {
+                let product = draft
+                    .products
+                    .iter()
+                    .find(|product| product.id == placement.product_id)
+                    .unwrap();
+                DraftVersion::display_width(placement, product).sixteenths()
+            })
+            .sum::<i32>()
+            + MIN_PLACEMENT_GAP.sixteenths() * 2;
+        assert_eq!(occupied, 752);
+        assert!(DEFAULT_FIXTURE_WIDTH.sixteenths() - occupied < 68);
+
+        let undone = draft.undo_change_set(&version, &change_set_id, 2);
+        assert!(matches!(undone, CommandResult::Applied { revision: 3, .. }));
         assert_eq!(draft.placements, before);
     }
 
