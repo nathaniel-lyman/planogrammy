@@ -119,6 +119,7 @@ A keyboard user must be able to select an adjustable shelf, move it, edit its el
 
 - Rust domain tests live in `crates/planogram-core/src/tests.rs`. Use its helpers: `add` (checked setup add at the current revision), `add_change`, `expect_applied`, and `assert_rejected_unchanged` (asserts the validation code and that geometry, revision, and history are unchanged).
 - Vitest data and canned Wasm results come from `apps/web/src/testFixtures.ts`. TypeScript tests check transport and routing only; they must not re-derive Rust geometry.
+- Saved-file compatibility fixtures live in `crates/planogram-wasm/fixtures/` and are checked by `crates/planogram-wasm/src/golden.rs`. Opening replays history through the current engine, so a failure there means a change broke earlier downloads. Never edit or regenerate a committed fixture to make it pass; add an explicit migration and a new fixture instead.
 - Browser tests use the helpers at the top of `apps/web/tests/browser/editor.spec.ts` (`openEditor`, `openEditorWithSiteTools`, `callSiteTool`, `expectRevision`, `skipUnlessRevision`). Scope text assertions to a panel when the same value can appear in the canvas outline, inspector, and companion.
 
 ## Commands

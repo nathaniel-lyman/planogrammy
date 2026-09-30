@@ -1,0 +1,1249 @@
+{
+  "format": "planogrammy-bay",
+  "format_version": 1,
+  "name": "Standard bay fixture",
+  "draft": {
+    "change_sets": [
+      {
+        "actor": "human",
+        "base_revision": 0,
+        "compensates": null,
+        "id": "change_0001",
+        "operations": [
+          {
+            "placement": {
+              "facings_x": 3,
+              "facings_y": 1,
+              "facings_z": 4,
+              "id": "placement_0001",
+              "product_id": "jif_creamy_16",
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 0
+            },
+            "type": "add_placement"
+          }
+        ],
+        "reason": "Add tray",
+        "resulting_revision": 1
+      },
+      {
+        "actor": "human",
+        "base_revision": 1,
+        "compensates": null,
+        "id": "change_0002",
+        "operations": [
+          {
+            "placement": {
+              "facings_x": 1,
+              "facings_y": 1,
+              "facings_z": 1,
+              "id": "placement_0002",
+              "product_id": "jif_crunchy_16",
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 178
+            },
+            "type": "add_placement"
+          }
+        ],
+        "reason": "Add loose",
+        "resulting_revision": 2
+      },
+      {
+        "actor": "webmcp",
+        "base_revision": 2,
+        "compensates": null,
+        "id": "change_0003",
+        "operations": [
+          {
+            "placement": {
+              "facings_x": 1,
+              "facings_y": 1,
+              "facings_z": 1,
+              "id": "placement_0003",
+              "product_id": "skippy_creamy_40",
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 238
+            },
+            "type": "add_placement"
+          }
+        ],
+        "reason": "Agent add",
+        "resulting_revision": 3
+      },
+      {
+        "actor": "human",
+        "base_revision": 3,
+        "compensates": null,
+        "id": "change_0004",
+        "operations": [
+          {
+            "after": {
+              "facings_x": 2,
+              "facings_y": 1,
+              "facings_z": 1
+            },
+            "before": {
+              "facings_x": 1,
+              "facings_y": 1,
+              "facings_z": 1
+            },
+            "placement_id": "placement_0002",
+            "type": "change_facings"
+          },
+          {
+            "after": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 294
+            },
+            "before": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 238
+            },
+            "placement_id": "placement_0003",
+            "type": "move_placement"
+          }
+        ],
+        "reason": "Widen",
+        "resulting_revision": 4
+      },
+      {
+        "actor": "human",
+        "base_revision": 4,
+        "compensates": null,
+        "id": "change_0005",
+        "operations": [
+          {
+            "after": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 102
+            },
+            "before": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 0
+            },
+            "placement_id": "placement_0001",
+            "type": "move_placement"
+          },
+          {
+            "after": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 382
+            },
+            "before": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 178
+            },
+            "placement_id": "placement_0002",
+            "type": "move_placement"
+          },
+          {
+            "after": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 600
+            },
+            "before": {
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 294
+            },
+            "placement_id": "placement_0003",
+            "type": "move_placement"
+          }
+        ],
+        "reason": "Space evenly",
+        "resulting_revision": 5
+      },
+      {
+        "actor": "webmcp",
+        "base_revision": 5,
+        "compensates": null,
+        "id": "change_0006",
+        "operations": [
+          {
+            "after": {
+              "facings_x": 3,
+              "facings_y": 1,
+              "facings_z": 4,
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 10
+            },
+            "before": {
+              "facings_x": 3,
+              "facings_y": 1,
+              "facings_z": 4,
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 102
+            },
+            "placement_id": "placement_0001",
+            "type": "reflow_placement"
+          },
+          {
+            "after": {
+              "facings_x": 5,
+              "facings_y": 1,
+              "facings_z": 1,
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 196
+            },
+            "before": {
+              "facings_x": 2,
+              "facings_y": 1,
+              "facings_z": 1,
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 382
+            },
+            "placement_id": "placement_0002",
+            "type": "reflow_placement"
+          },
+          {
+            "after": {
+              "facings_x": 4,
+              "facings_y": 1,
+              "facings_z": 1,
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 492
+            },
+            "before": {
+              "facings_x": 1,
+              "facings_y": 1,
+              "facings_z": 1,
+              "shelf_id": "shelf_01",
+              "x_sixteenths": 600
+            },
+            "placement_id": "placement_0003",
+            "type": "reflow_placement"
+          }
+        ],
+        "reason": "Fill evenly",
+        "resulting_revision": 6
+      },
+      {
+        "actor": "human",
+        "base_revision": 6,
+        "compensates": null,
+        "id": "change_0007",
+        "operations": [
+          {
+            "placement": {
+              "facings_x": 3,
+              "facings_y": 1,
+              "facings_z": 4,
+              "id": "placement_0004",
+              "product_id": "peter_pan_creamy_16",
+              "shelf_id": "shelf_02",
+              "x_sixteenths": 0
+            },
+            "type": "add_placement"
+          }
+        ],
+        "reason": "Proposal add",
+        "resulting_revision": 7
+      },
+      {
+        "actor": "human",
+        "base_revision": 7,
+        "compensates": null,
+        "id": "change_0008",
+        "operations": [
+          {
+            "after": {
+              "shelf_id": "shelf_02",
+              "x_sixteenths": 8
+            },
+            "before": {
+              "shelf_id": "shelf_02",
+              "x_sixteenths": 0
+            },
+            "placement_id": "placement_0004",
+            "type": "move_placement"
+          }
+        ],
+        "reason": "Nudge",
+        "resulting_revision": 8
+      },
+      {
+        "actor": "human",
+        "base_revision": 8,
+        "compensates": null,
+        "id": "change_0009",
+        "operations": [
+          {
+            "after_sixteenths": 1168,
+            "before_sixteenths": 1152,
+            "shelf_id": "shelf_06",
+            "type": "move_shelf"
+          }
+        ],
+        "reason": "Raise top shelf",
+        "resulting_revision": 9
+      },
+      {
+        "actor": "human",
+        "base_revision": 9,
+        "compensates": null,
+        "id": "change_0010",
+        "operations": [
+          {
+            "placement": {
+              "facings_x": 3,
+              "facings_y": 1,
+              "facings_z": 4,
+              "id": "placement_0004",
+              "product_id": "peter_pan_creamy_16",
+              "shelf_id": "shelf_02",
+              "x_sixteenths": 8
+            },
+            "type": "remove_placement"
+          }
+        ],
+        "reason": "Remove",
+        "resulting_revision": 10
+      },
+      {
+        "actor": "human",
+        "base_revision": 10,
+        "compensates": "change_0010",
+        "id": "change_0011",
+        "operations": [
+          {
+            "placement": {
+              "facings_x": 3,
+              "facings_y": 1,
+              "facings_z": 4,
+              "id": "placement_0004",
+              "product_id": "peter_pan_creamy_16",
+              "shelf_id": "shelf_02",
+              "x_sixteenths": 8
+            },
+            "type": "add_placement"
+          }
+        ],
+        "reason": "Undo change_0010",
+        "resulting_revision": 11
+      }
+    ],
+    "fixture": {
+      "depth_sixteenths": 352,
+      "height_sixteenths": 1344,
+      "id": "fixture_standard_4ft",
+      "name": "4' Standard Bay",
+      "sections": [
+        {
+          "fixture_id": "fixture_standard_4ft",
+          "height_sixteenths": 1344,
+          "id": "section_01",
+          "sequence": 0,
+          "shelves": [
+            {
+              "depth_sixteenths": 352,
+              "elevation_sixteenths": 0,
+              "id": "base_deck",
+              "kind": "base_deck",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            },
+            {
+              "depth_sixteenths": 256,
+              "elevation_sixteenths": 192,
+              "id": "shelf_01",
+              "kind": "adjustable",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            },
+            {
+              "depth_sixteenths": 256,
+              "elevation_sixteenths": 384,
+              "id": "shelf_02",
+              "kind": "adjustable",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            },
+            {
+              "depth_sixteenths": 256,
+              "elevation_sixteenths": 576,
+              "id": "shelf_03",
+              "kind": "adjustable",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            },
+            {
+              "depth_sixteenths": 256,
+              "elevation_sixteenths": 768,
+              "id": "shelf_04",
+              "kind": "adjustable",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            },
+            {
+              "depth_sixteenths": 256,
+              "elevation_sixteenths": 960,
+              "id": "shelf_05",
+              "kind": "adjustable",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            },
+            {
+              "depth_sixteenths": 256,
+              "elevation_sixteenths": 1168,
+              "id": "shelf_06",
+              "kind": "adjustable",
+              "section_id": "section_01",
+              "width_sixteenths": 768
+            }
+          ],
+          "width_sixteenths": 768
+        }
+      ],
+      "width_sixteenths": 768
+    },
+    "id": "version_draft_01",
+    "next_change_set": 12,
+    "next_placement": 5,
+    "placements": [
+      {
+        "facings_x": 3,
+        "facings_y": 1,
+        "facings_z": 4,
+        "id": "placement_0001",
+        "product_id": "jif_creamy_16",
+        "shelf_id": "shelf_01",
+        "x_sixteenths": 10
+      },
+      {
+        "facings_x": 5,
+        "facings_y": 1,
+        "facings_z": 1,
+        "id": "placement_0002",
+        "product_id": "jif_crunchy_16",
+        "shelf_id": "shelf_01",
+        "x_sixteenths": 196
+      },
+      {
+        "facings_x": 4,
+        "facings_y": 1,
+        "facings_z": 1,
+        "id": "placement_0003",
+        "product_id": "skippy_creamy_40",
+        "shelf_id": "shelf_01",
+        "x_sixteenths": 492
+      },
+      {
+        "facings_x": 3,
+        "facings_y": 1,
+        "facings_z": 4,
+        "id": "placement_0004",
+        "product_id": "peter_pan_creamy_16",
+        "shelf_id": "shelf_02",
+        "x_sixteenths": 8
+      }
+    ],
+    "products": [
+      {
+        "brand": "Jif",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          207,
+          31,
+          38
+        ],
+        "description": "Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 57,
+          "height_sixteenths": 78,
+          "source": "Representative package measurement",
+          "width_sixteenths": 57
+        },
+        "id": "jif_creamy_16",
+        "lid_color": [
+          207,
+          31,
+          38
+        ],
+        "net_weight_ounces_hundredths": 1600,
+        "performance": {
+          "gross_margin_basis_points": 2850,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 3665,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 10500
+        },
+        "size_oz": "16 oz",
+        "tray": {
+          "facings_x": 3,
+          "front_lip_height_sixteenths": 20,
+          "outer_depth_sixteenths": 232,
+          "outer_height_sixteenths": 80,
+          "outer_width_sixteenths": 175,
+          "units_deep": 4
+        },
+        "upc": "051500255162"
+      },
+      {
+        "brand": "Jif",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          207,
+          31,
+          38
+        ],
+        "description": "Extra Crunchy Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 57,
+          "height_sixteenths": 78,
+          "source": "Representative package measurement",
+          "width_sixteenths": 57
+        },
+        "id": "jif_crunchy_16",
+        "lid_color": [
+          207,
+          31,
+          38
+        ],
+        "net_weight_ounces_hundredths": 1600,
+        "performance": {
+          "gross_margin_basis_points": 2875,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 2024,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 5800
+        },
+        "size_oz": "16 oz",
+        "tray": null,
+        "upc": "051500255179"
+      },
+      {
+        "brand": "Jif",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          207,
+          31,
+          38
+        ],
+        "description": "Natural Creamy Peanut Butter Spread",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 58,
+          "height_sixteenths": 79,
+          "source": "Representative package measurement",
+          "width_sixteenths": 58
+        },
+        "id": "jif_natural_16",
+        "lid_color": [
+          141,
+          91,
+          38
+        ],
+        "net_weight_ounces_hundredths": 1600,
+        "performance": {
+          "gross_margin_basis_points": 3100,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1716,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 4300
+        },
+        "size_oz": "16 oz",
+        "tray": null,
+        "upc": "051500243626"
+      },
+      {
+        "brand": "Jif",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          207,
+          31,
+          38
+        ],
+        "description": "Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 68,
+          "height_sixteenths": 126,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 68
+        },
+        "id": "jif_creamy_40",
+        "lid_color": [
+          207,
+          31,
+          38
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2550,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 3895,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 5200
+        },
+        "size_oz": "40 oz",
+        "tray": null,
+        "upc": "051500720004"
+      },
+      {
+        "brand": "Jif",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          207,
+          31,
+          38
+        ],
+        "description": "Extra Crunchy Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 68,
+          "height_sixteenths": 126,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 68
+        },
+        "id": "jif_crunchy_40",
+        "lid_color": [
+          207,
+          31,
+          38
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2575,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1947,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 2600
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "051500720028"
+      },
+      {
+        "brand": "Jif",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          207,
+          31,
+          38
+        ],
+        "description": "Natural Creamy Peanut Butter Spread",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 68,
+          "height_sixteenths": 126,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 68
+        },
+        "id": "jif_natural_40",
+        "lid_color": [
+          141,
+          91,
+          38
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2800,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1678,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 2100
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "051500243213"
+      },
+      {
+        "brand": "SKIPPY",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          24,
+          132,
+          164
+        ],
+        "description": "Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 59,
+          "height_sixteenths": 76,
+          "source": "Representative package measurement",
+          "width_sixteenths": 59
+        },
+        "id": "skippy_creamy_16",
+        "lid_color": [
+          26,
+          127,
+          158
+        ],
+        "net_weight_ounces_hundredths": 1630,
+        "performance": {
+          "gross_margin_basis_points": 2900,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 2928,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 8900
+        },
+        "size_oz": "16.3 oz",
+        "tray": {
+          "facings_x": 3,
+          "front_lip_height_sixteenths": 20,
+          "outer_depth_sixteenths": 240,
+          "outer_height_sixteenths": 78,
+          "outer_width_sixteenths": 181,
+          "units_deep": 4
+        },
+        "upc": "037600110754"
+      },
+      {
+        "brand": "SKIPPY",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          24,
+          132,
+          164
+        ],
+        "description": "SUPER CHUNK Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 59,
+          "height_sixteenths": 76,
+          "source": "Representative package measurement",
+          "width_sixteenths": 59
+        },
+        "id": "skippy_chunk_16",
+        "lid_color": [
+          25,
+          81,
+          151
+        ],
+        "net_weight_ounces_hundredths": 1630,
+        "performance": {
+          "gross_margin_basis_points": 2925,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1546,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 4700
+        },
+        "size_oz": "16.3 oz",
+        "tray": null,
+        "upc": "037600110761"
+      },
+      {
+        "brand": "SKIPPY",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          24,
+          132,
+          164
+        ],
+        "description": "Natural Creamy Peanut Butter Spread",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 58,
+          "height_sixteenths": 76,
+          "source": "Representative package measurement",
+          "width_sixteenths": 58
+        },
+        "id": "skippy_natural_16",
+        "lid_color": [
+          170,
+          116,
+          50
+        ],
+        "net_weight_ounces_hundredths": 1500,
+        "performance": {
+          "gross_margin_basis_points": 3150,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1364,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 3600
+        },
+        "size_oz": "15 oz",
+        "tray": null,
+        "upc": "037600105439"
+      },
+      {
+        "brand": "SKIPPY",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          24,
+          132,
+          164
+        ],
+        "description": "Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 67,
+          "height_sixteenths": 124,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 67
+        },
+        "id": "skippy_creamy_40",
+        "lid_color": [
+          26,
+          127,
+          158
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2600,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 3076,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 4400
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "037600106254"
+      },
+      {
+        "brand": "SKIPPY",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          24,
+          132,
+          164
+        ],
+        "description": "SUPER CHUNK Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 67,
+          "height_sixteenths": 124,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 67
+        },
+        "id": "skippy_chunk_40",
+        "lid_color": [
+          25,
+          81,
+          151
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2625,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1538,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 2200
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "037600106186"
+      },
+      {
+        "brand": "SKIPPY",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          24,
+          132,
+          164
+        ],
+        "description": "Natural Creamy Peanut Butter Spread",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 67,
+          "height_sixteenths": 124,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 67
+        },
+        "id": "skippy_natural_40",
+        "lid_color": [
+          170,
+          116,
+          50
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2850,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1348,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 1800
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "037600106742"
+      },
+      {
+        "brand": "Peter Pan",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          37,
+          127,
+          75
+        ],
+        "description": "Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 58,
+          "height_sixteenths": 76,
+          "source": "Representative package measurement",
+          "width_sixteenths": 58
+        },
+        "id": "peter_pan_creamy_16",
+        "lid_color": [
+          244,
+          205,
+          36
+        ],
+        "net_weight_ounces_hundredths": 1630,
+        "performance": {
+          "gross_margin_basis_points": 2750,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1914,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 6400
+        },
+        "size_oz": "16.3 oz",
+        "tray": {
+          "facings_x": 3,
+          "front_lip_height_sixteenths": 20,
+          "outer_depth_sixteenths": 236,
+          "outer_height_sixteenths": 78,
+          "outer_width_sixteenths": 178,
+          "units_deep": 4
+        },
+        "upc": "045300005267"
+      },
+      {
+        "brand": "Peter Pan",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          37,
+          127,
+          75
+        ],
+        "description": "Crunchy Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 58,
+          "height_sixteenths": 76,
+          "source": "Representative package measurement",
+          "width_sixteenths": 58
+        },
+        "id": "peter_pan_crunchy_16",
+        "lid_color": [
+          244,
+          205,
+          36
+        ],
+        "net_weight_ounces_hundredths": 1630,
+        "performance": {
+          "gross_margin_basis_points": 2775,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 927,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 3100
+        },
+        "size_oz": "16.3 oz",
+        "tray": null,
+        "upc": "045300005250"
+      },
+      {
+        "brand": "Peter Pan",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          37,
+          127,
+          75
+        ],
+        "description": "Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 70,
+          "height_sixteenths": 126,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 70
+        },
+        "id": "peter_pan_creamy_40",
+        "lid_color": [
+          244,
+          205,
+          36
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2500,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1947,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 3000
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "045300299323"
+      },
+      {
+        "brand": "Peter Pan",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          37,
+          127,
+          75
+        ],
+        "description": "Crunchy Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 70,
+          "height_sixteenths": 126,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 70
+        },
+        "id": "peter_pan_crunchy_40",
+        "lid_color": [
+          244,
+          205,
+          36
+        ],
+        "net_weight_ounces_hundredths": 4000,
+        "performance": {
+          "gross_margin_basis_points": 2525,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 909,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 1400
+        },
+        "size_oz": "40 oz family size",
+        "tray": null,
+        "upc": "045300299309"
+      },
+      {
+        "brand": "Smucker's",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          119,
+          75,
+          44
+        ],
+        "description": "Natural Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 56,
+          "height_sixteenths": 82,
+          "source": "Representative package measurement",
+          "width_sixteenths": 56
+        },
+        "id": "smuckers_natural_16",
+        "lid_color": [
+          111,
+          67,
+          34
+        ],
+        "net_weight_ounces_hundredths": 1600,
+        "performance": {
+          "gross_margin_basis_points": 3300,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1572,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 3500
+        },
+        "size_oz": "16 oz",
+        "tray": {
+          "facings_x": 2,
+          "front_lip_height_sixteenths": 20,
+          "outer_depth_sixteenths": 172,
+          "outer_height_sixteenths": 84,
+          "outer_width_sixteenths": 116,
+          "units_deep": 3
+        },
+        "upc": "051500017012"
+      },
+      {
+        "brand": "Smucker's",
+        "casepack_quantity": 12,
+        "category": "Peanut Butter",
+        "color": [
+          119,
+          75,
+          44
+        ],
+        "description": "Natural Chunky Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 56,
+          "height_sixteenths": 82,
+          "source": "Representative package measurement",
+          "width_sixteenths": 56
+        },
+        "id": "smuckers_chunky_16",
+        "lid_color": [
+          111,
+          67,
+          34
+        ],
+        "net_weight_ounces_hundredths": 1600,
+        "performance": {
+          "gross_margin_basis_points": 3325,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 808,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 1800
+        },
+        "size_oz": "16 oz",
+        "tray": null,
+        "upc": "051500017029"
+      },
+      {
+        "brand": "Smucker's",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          119,
+          75,
+          44
+        ],
+        "description": "Natural Creamy Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 60,
+          "height_sixteenths": 122,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 60
+        },
+        "id": "smuckers_natural_26",
+        "lid_color": [
+          111,
+          67,
+          34
+        ],
+        "net_weight_ounces_hundredths": 2600,
+        "performance": {
+          "gross_margin_basis_points": 3100,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1298,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 2000
+        },
+        "size_oz": "26 oz tall glass",
+        "tray": null,
+        "upc": "051500017036"
+      },
+      {
+        "brand": "Smucker's",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          119,
+          75,
+          44
+        ],
+        "description": "Natural Chunky Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 60,
+          "height_sixteenths": 122,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 60
+        },
+        "id": "smuckers_chunky_26",
+        "lid_color": [
+          111,
+          67,
+          34
+        ],
+        "net_weight_ounces_hundredths": 2600,
+        "performance": {
+          "gross_margin_basis_points": 3125,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 649,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 1000
+        },
+        "size_oz": "26 oz tall glass",
+        "tray": null,
+        "upc": "051500017043"
+      },
+      {
+        "brand": "Justin's",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          195,
+          142,
+          48
+        ],
+        "description": "Classic Peanut Butter",
+        "dimensions": {
+          "confidence": "medium",
+          "depth_sixteenths": 56,
+          "height_sixteenths": 84,
+          "source": "Representative package measurement",
+          "width_sixteenths": 56
+        },
+        "id": "justins_classic_16",
+        "lid_color": [
+          164,
+          116,
+          41
+        ],
+        "net_weight_ounces_hundredths": 1600,
+        "performance": {
+          "gross_margin_basis_points": 3600,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 1118,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 1600
+        },
+        "size_oz": "16 oz",
+        "tray": {
+          "facings_x": 2,
+          "front_lip_height_sixteenths": 20,
+          "outer_depth_sixteenths": 172,
+          "outer_height_sixteenths": 86,
+          "outer_width_sixteenths": 116,
+          "units_deep": 3
+        },
+        "upc": "894455000018"
+      },
+      {
+        "brand": "Justin's",
+        "casepack_quantity": 6,
+        "category": "Peanut Butter",
+        "color": [
+          195,
+          142,
+          48
+        ],
+        "description": "Classic Peanut Butter",
+        "dimensions": {
+          "confidence": "concept",
+          "depth_sixteenths": 64,
+          "height_sixteenths": 124,
+          "source": "Representative tall family-size package",
+          "width_sixteenths": 64
+        },
+        "id": "justins_classic_28",
+        "lid_color": [
+          164,
+          116,
+          41
+        ],
+        "net_weight_ounces_hundredths": 2800,
+        "performance": {
+          "gross_margin_basis_points": 3400,
+          "period": "Trailing 13 weeks",
+          "sales_per_store_per_week_cents": 879,
+          "source": "Synthetic representative 13-week average; not retailer actuals",
+          "units_per_store_per_week_milliunits": 800
+        },
+        "size_oz": "28 oz family size",
+        "tray": null,
+        "upc": "840379101393"
+      }
+    ],
+    "revision": 11,
+    "status": "draft"
+  }
+}

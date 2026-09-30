@@ -10,6 +10,8 @@ The Wasm transport parses the file, rejects unsupported versions and unknown/inc
 
 Version 1 supports the existing standard bay with moved shelves and the saved catalog, not arbitrary fixture import. Limits are 8 MiB per file, 100 name characters, 10,000 change sets, 1,000 catalog entries and 1,000 operations per change set. Catalog dimensions are bounded to 1,000 inches before geometry math; fixed-point performance must be safely representable by JavaScript integers. Files carry no authenticity signature: validation establishes a consistent editable history, not the real-world identity of an actor. Future incompatible schema or command semantics require an explicit format migration/version change.
 
+Committed sample files in `crates/planogram-wasm/fixtures/` (one version 1 bay and one version 2 cereal scenario) must keep opening in every build. When replay fails, the error names the first change set that no longer replays so the incompatible command can be traced.
+
 There is no cloud storage, autosave, login, PSA import or publication in this slice.
 
 ## Version 2: cereal scenarios

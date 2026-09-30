@@ -1,5 +1,7 @@
 mod bay_file;
 mod document;
+#[cfg(test)]
+mod golden;
 use document::EditorDocument;
 use planogram_core::{
     ChangeSetId, CommandResult, DraftVersion, FacingsRequest, Length, PlacementChange, PlacementId,

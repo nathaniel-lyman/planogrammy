@@ -68,9 +68,19 @@ impl DraftVersion {
         if !replay.validate_planogram().valid {
             return Err(invalid());
         }
-        for recorded in &self.change_sets {
+        let total = self.change_sets.len();
+        // Name the first failing change set so an unopenable file can be traced
+        // to the command whose semantics changed or whose record was edited.
+        let failed = |index: usize, recorded: &ChangeSet, detail: &str| {
+            format!(
+                "The bay snapshot or its change history is inconsistent: change set {} ({} of {total}) {detail}.",
+                recorded.id.0,
+                index + 1
+            )
+        };
+        for (index, recorded) in self.change_sets.iter().enumerate() {
             if recorded.operations.is_empty() || recorded.operations.len() > 1_000 {
-                return Err(invalid());
+                return Err(failed(index, recorded, "has an invalid operation count"));
             }
             let result = if let Some(compensates) = &recorded.compensates {
                 replay.undo_change_set_as(&self.id, compensates, replay.revision, &recorded.actor)
@@ -78,7 +88,7 @@ impl DraftVersion {
             {
                 if !(1..=DEFAULT_FIXTURE_HEIGHT.sixteenths()).contains(&movement.after.sixteenths())
                 {
-                    return Err(invalid());
+                    return Err(failed(index, recorded, "moves a shelf outside the fixture"));
                 }
                 replay.move_shelf(
                     &self.id,
@@ -93,7 +103,7 @@ impl DraftVersion {
                     .iter()
                     .map(snapshot_change)
                     .collect::<Option<Vec<_>>>()
-                    .ok_or_else(invalid)?;
+                    .ok_or_else(|| failed(index, recorded, "contains an unreplayable operation"))?;
                 // Each operation contains an exact resolved position, so replay
                 // reuses the same atomic validator as undo and proposals.
                 replay.apply_placement_changes_as(
@@ -106,11 +116,21 @@ impl DraftVersion {
             };
             match result {
                 CommandResult::Applied { change_set, .. } if change_set == *recorded => {}
-                _ => return Err(invalid()),
+                CommandResult::Applied { .. } => {
+                    return Err(failed(
+                        index,
+                        recorded,
+                        "replays to different operations than recorded",
+                    ))
+                }
+                _ => return Err(failed(index, recorded, "is rejected by the current engine")),
             }
         }
         if replay != *self {
-            return Err(invalid());
+            return Err(
+                "The bay snapshot or its change history is inconsistent: the replayed history does not match the saved snapshot."
+                    .into(),
+            );
         }
         Ok(())
     }

@@ -1448,6 +1448,32 @@ fn snapshot_replays_all_command_types_and_compensating_history() {
 }
 
 #[test]
+fn snapshot_errors_name_the_first_change_set_that_fails_to_replay() {
+    let mut draft = DraftVersion::default();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+
+    let mut edited = draft.clone();
+    edited.change_sets[1].base_revision = 99;
+    let error = edited.validate_snapshot().unwrap_err();
+    assert!(
+        error.contains("change set change_0002 (2 of 3) replays to different operations"),
+        "{error}"
+    );
+
+    let mut rejected = draft.clone();
+    if let PlanogramOperation::AddPlacement(add) = &mut rejected.change_sets[0].operations[0] {
+        add.placement.shelf_id = shelf("base_deck");
+    }
+    let error = rejected.validate_snapshot().unwrap_err();
+    assert!(
+        error.contains("change set change_0001 (1 of 3) is rejected by the current engine"),
+        "{error}"
+    );
+}
+
+#[test]
 fn snapshot_rejects_corrupt_geometry_ids_counters_and_history_without_mutating() {
     let mut draft = DraftVersion::default();
     add(&mut draft, "jif_creamy_16", "shelf_01");
