@@ -106,12 +106,18 @@ impl DraftVersion {
                     .ok_or_else(|| failed(index, recorded, "contains an unreplayable operation"))?;
                 // Each operation contains an exact resolved position, so replay
                 // reuses the same atomic validator as undo and proposals.
-                replay.apply_placement_changes_as(
+                // Recorded layout: replay must reproduce each saved position
+                // exactly, even if default shelf spacing changes later.
+                replay.apply_placement_changes_with_compensation(
                     &self.id,
                     &changes,
                     replay.revision,
-                    &recorded.actor,
-                    &recorded.reason,
+                    ChangeSetMetadata {
+                        actor: recorded.actor.clone(),
+                        reason: recorded.reason.clone(),
+                        compensates: None,
+                    },
+                    ShelfLayout::Recorded,
                 )
             };
             match result {

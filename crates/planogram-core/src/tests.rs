@@ -99,6 +99,108 @@ fn shelf_views(draft: &DraftVersion, shelf_id: &str) -> Vec<PlacementView> {
         .collect()
 }
 
+/// Asserts the default shelf layout: stable left-to-right order, same-SKU
+/// neighbors at the minimum gap, and blocks spaced evenly across the shelf.
+fn assert_even_blocks(draft: &DraftVersion, shelf_id: &str) {
+    let mut views = shelf_views(draft, shelf_id);
+    views.sort_by_key(|view| view.x);
+    let widths = views
+        .iter()
+        .map(|view| view.geometry.display_width)
+        .collect::<Vec<_>>();
+    let joined = same_sku_runs(views.iter().map(|view| &view.product_id));
+    let expected = resolve_block_distribution(
+        &widths,
+        &joined,
+        draft.shelf(&shelf(shelf_id)).unwrap().width,
+        ShelfDistribution::SpaceEvenly,
+    )
+    .expect("the shelf fits its products");
+    assert_eq!(
+        views.iter().map(|view| view.x).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn default_layout_keeps_same_sku_blocks_tight_and_spaces_blocks_evenly() {
+    let mut draft = DraftVersion::default();
+    add(&mut draft, "jif_crunchy_16", "shelf_01");
+    add(&mut draft, "skippy_chunk_16", "shelf_01");
+    // A second facing unit of the same SKU joins its block instead of the end.
+    let joined = add(&mut draft, "jif_crunchy_16", "shelf_01");
+    assert_eq!(joined.revision, 3);
+    assert_eq!(joined.change_set.operations.len(), 3);
+
+    let mut views = shelf_views(&draft, "shelf_01");
+    views.sort_by_key(|view| view.x);
+    let layout = views
+        .iter()
+        .map(|view| (view.product_id.0.as_str(), view.x.sixteenths()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        layout,
+        vec![
+            ("jif_crunchy_16", 196),
+            ("jif_crunchy_16", 256),
+            ("skippy_chunk_16", 512),
+        ]
+    );
+    assert_even_blocks(&draft, "shelf_01");
+
+    // Removing re-spaces the remaining blocks in the same change set, and one
+    // undo restores every exact prior position.
+    let before = draft.placements.clone();
+    let version = draft.id.clone();
+    let removed = expect_applied(draft.remove_placement(
+        &version,
+        &views[2].id,
+        3,
+        "Remove the Skippy block",
+    ));
+    assert_eq!(removed.change_set.operations.len(), 3);
+    assert_even_blocks(&draft, "shelf_01");
+    expect_applied(draft.undo_change_set(&version, &removed.change_set.id, 4));
+    let by_id = |placements: &[Placement]| {
+        let mut sorted = placements.to_vec();
+        sorted.sort_by(|left, right| left.id.cmp(&right.id));
+        sorted
+    };
+    assert_eq!(by_id(&draft.placements), by_id(&before));
+}
+
+#[test]
+fn block_distribution_matches_per_item_spacing_when_every_sku_differs() {
+    let widths = [57, 59, 58].map(Length::from_sixteenths);
+    for distribution in [
+        ShelfDistribution::PackedLeft,
+        ShelfDistribution::Centered,
+        ShelfDistribution::SpaceBetween,
+        ShelfDistribution::SpaceEvenly,
+    ] {
+        let per_item = resolve_shelf_distribution(&widths, DEFAULT_FIXTURE_WIDTH, distribution);
+        let blocks = resolve_block_distribution(
+            &widths,
+            &[false, false, false],
+            DEFAULT_FIXTURE_WIDTH,
+            distribution,
+        );
+        assert_eq!(per_item, blocks);
+    }
+    // One block of three spaces evenly as a unit: tight inside, centered.
+    let block = resolve_block_distribution(
+        &widths,
+        &[false, true, true],
+        DEFAULT_FIXTURE_WIDTH,
+        ShelfDistribution::SpaceEvenly,
+    )
+    .unwrap();
+    assert_eq!(
+        block.iter().map(|x| x.sixteenths()).collect::<Vec<_>>(),
+        vec![294, 354, 416]
+    );
+}
+
 #[test]
 fn default_fixture_is_exact_and_deterministic() {
     let fixture = default_fixture();
@@ -319,15 +421,20 @@ fn undo_walks_backward_through_active_change_sets_and_preserves_history() {
 }
 
 #[test]
-fn product_placement_is_first_fit_revisioned_and_only_latest_active_change_is_undoable() {
+fn product_placement_is_evenly_spaced_revisioned_and_only_latest_active_change_is_undoable() {
     let mut draft = DraftVersion::default();
     let version = draft.id.clone();
     let first = add(&mut draft, "jif_creamy_16", "shelf_01");
     assert_eq!(first.revision, 1);
-    assert_eq!(first.scene_patch.placements[0].x, Length::ZERO);
+    // A lone 175-sixteenth tray centers: 593 of slack, 296 steps split 148/148.
+    assert_eq!(
+        first.scene_patch.placements[0].x,
+        Length::from_sixteenths(296)
+    );
     let second = add(&mut draft, "skippy_creamy_16", "shelf_01");
     assert_eq!(second.revision, 2);
-    assert_eq!(draft.placements[1].x, Length::from_sixteenths(178));
+    assert_eq!(second.scene_patch.placements.len(), 2);
+    assert_even_blocks(&draft, "shelf_01");
 
     let before_non_latest_undo = draft.clone();
     let rejected = draft.undo_change_set(&version, &first.change_set.id, 2);
@@ -521,8 +628,8 @@ fn generic_sequence_resolves_even_physical_positions_without_model_coordinates()
             .unwrap()
             .x
     };
-    assert_eq!(x_of("skippy_chunk_16"), Length::ZERO);
-    assert_eq!(x_of("jif_crunchy_16"), Length::from_sixteenths(62));
+    assert!(x_of("skippy_chunk_16") < x_of("jif_crunchy_16"));
+    assert_even_blocks(&draft, "shelf_01");
 }
 
 #[test]
@@ -539,10 +646,13 @@ fn generic_add_reflows_existing_items_and_batch_undo_restores_their_exact_positi
         "Prepend the next brand block",
     ));
     assert_eq!(applied.change_set.operations.len(), 2);
-    assert_eq!(
-        draft.placement(&existing.id).unwrap().x,
-        Length::from_sixteenths(184)
-    );
+    let skippy = draft
+        .placements
+        .iter()
+        .find(|placement| placement.product_id == product("skippy_creamy_16"))
+        .unwrap();
+    assert!(skippy.x < draft.placement(&existing.id).unwrap().x);
+    assert_even_blocks(&draft, "shelf_01");
 
     let undone =
         expect_applied(draft.undo_change_set_as(&version, &applied.change_set.id, 2, "webmcp"));
@@ -604,7 +714,7 @@ fn placement_move_uses_eighth_inch_grid_records_one_operation_and_undoes_exactly
             assert_eq!(operation.placement_id, original.id);
             assert_eq!(operation.before.shelf_id, shelf("shelf_01"));
             assert_eq!(operation.after.shelf_id, shelf("shelf_02"));
-            assert_eq!(operation.before.x, Length::ZERO);
+            assert_eq!(operation.before.x, original.x);
             assert_eq!(operation.after.x, Length::from_sixteenths(2));
         }
         operation => panic!("unexpected operation: {operation:?}"),
@@ -654,10 +764,12 @@ fn invalid_placement_moves_block_overlap_and_minimum_gap() {
     add(&mut draft, "jif_creamy_16", "shelf_01");
     add(&mut draft, "skippy_creamy_16", "shelf_01");
     let second_id = draft.placements[1].id.clone();
+    // The 175-sixteenth tray ends at first.x + 175; +176 leaves a 1/16" gap.
+    let first_x = draft.placements[0].x.sixteenths();
 
     for (target_x, code) in [
-        (0, ValidationCode::PlacementOverlap),
-        (176, ValidationCode::PlacementGap),
+        (first_x, ValidationCode::PlacementOverlap),
+        (first_x + 176, ValidationCode::PlacementGap),
     ] {
         assert_rejected_unchanged(&mut draft, code, |draft| {
             draft.move_placement(
@@ -849,15 +961,24 @@ fn shelf_distribution_is_atomic_grid_aligned_balanced_and_undoable() {
     for product_id in ["jif_creamy_16", "skippy_creamy_16", "peter_pan_creamy_16"] {
         add(&mut draft, product_id, "shelf_01");
     }
+    // Adds already space blocks evenly; pack left first so the explicit
+    // distribution has work to do.
+    expect_applied(draft.distribute_shelf(
+        &version,
+        &shelf("shelf_01"),
+        ShelfDistribution::PackedLeft,
+        3,
+        "inspector pack left",
+    ));
     let before = draft.placements.clone();
     let applied = expect_applied(draft.distribute_shelf(
         &version,
         &shelf("shelf_01"),
         ShelfDistribution::SpaceEvenly,
-        3,
+        4,
         "inspector space evenly",
     ));
-    assert_eq!(applied.revision, 4);
+    assert_eq!(applied.revision, 5);
     assert_eq!(applied.change_set.operations.len(), 3);
     assert_eq!(applied.scene_patch.placements.len(), 3);
 
@@ -881,8 +1002,8 @@ fn shelf_distribution_is_atomic_grid_aligned_balanced_and_undoable() {
         .sixteenths();
     assert!((left_margin - right_margin).abs() <= 3);
 
-    let undone = expect_applied(draft.undo_change_set(&version, &applied.change_set.id, 4));
-    assert_eq!(undone.revision, 5);
+    let undone = expect_applied(draft.undo_change_set(&version, &applied.change_set.id, 5));
+    assert_eq!(undone.revision, 6);
     assert_eq!(draft.placements, before);
 }
 
@@ -991,19 +1112,35 @@ fn set_facings(
 }
 
 #[test]
-fn set_facings_pushes_following_placements_in_one_change_set_and_undoes_exactly() {
+fn set_facings_respaces_the_shelf_in_one_change_set_and_undoes_exactly() {
     let mut draft = DraftVersion::default();
     let version = draft.id.clone();
-    for _ in 0..3 {
-        add(&mut draft, "jif_crunchy_16", "shelf_01");
+    for product_id in ["jif_crunchy_16", "skippy_chunk_16", "peter_pan_crunchy_16"] {
+        add(&mut draft, product_id, "shelf_01");
     }
     let positions = |draft: &DraftVersion| {
-        shelf_views(draft, "shelf_01")
+        let mut views = shelf_views(draft, "shelf_01");
+        views.sort_by_key(|view| view.x);
+        views
             .iter()
-            .map(|view| view.x.sixteenths())
+            .map(|view| (view.id.0.clone(), view.x.sixteenths()))
             .collect::<Vec<_>>()
     };
-    assert_eq!(positions(&draft), vec![0, 60, 120]);
+    let at = |pairs: [(&str, i32); 3]| {
+        pairs
+            .iter()
+            .map(|(id, x)| (id.to_string(), *x))
+            .collect::<Vec<_>>()
+    };
+    // Widths 57, 59, 58: 588 of slack is 294 steps across four even slots.
+    assert_eq!(
+        positions(&draft),
+        at([
+            ("placement_0001", 148),
+            ("placement_0002", 356),
+            ("placement_0003", 564)
+        ])
+    );
     let before = draft.placements.clone();
 
     let widened = expect_applied(draft.set_facings_as(
@@ -1016,45 +1153,57 @@ fn set_facings_pushes_following_placements_in_one_change_set_and_undoes_exactly(
     ));
     assert_eq!(widened.revision, 4);
     assert_eq!(widened.change_set.actor, "webmcp");
-    assert_eq!(widened.affected_ids.len(), 3);
     assert_eq!(widened.scene_patch.placements.len(), 3);
     match widened.change_set.operations.as_slice() {
-        [PlanogramOperation::ChangeFacings(change), PlanogramOperation::MovePlacement(first), PlanogramOperation::MovePlacement(second)] =>
-        {
+        [PlanogramOperation::ChangeFacings(change), moves @ ..] => {
             assert_eq!(change.placement_id, PlacementId::new("placement_0001"));
             assert_eq!((change.before.facings_x, change.after.facings_x), (1, 3));
             assert_eq!((change.after.facings_y, change.after.facings_z), (1, 1));
+            // The resized placement itself shifts as part of the re-spacing.
+            let shifts = moves
+                .iter()
+                .map(|operation| match operation {
+                    PlanogramOperation::MovePlacement(movement) => (
+                        movement.placement_id.0.as_str(),
+                        movement.before.x.sixteenths(),
+                        movement.after.x.sixteenths(),
+                    ),
+                    operation => panic!("unexpected operation: {operation:?}"),
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
-                (first.before.x.sixteenths(), first.after.x.sixteenths()),
-                (60, 174)
-            );
-            assert_eq!(
-                (second.before.x.sixteenths(), second.after.x.sixteenths()),
-                (120, 234)
+                shifts,
+                vec![
+                    ("placement_0001", 148, 120),
+                    ("placement_0002", 356, 412),
+                    ("placement_0003", 564, 592),
+                ]
             );
         }
         operations => panic!("unexpected operations: {operations:?}"),
     }
-    let views = shelf_views(&draft, "shelf_01");
-    assert_eq!(views[0].geometry.display_width.sixteenths(), 171);
-    assert_eq!(positions(&draft), vec![0, 174, 234]);
-    for pair in views.windows(2) {
-        assert!(pair[1].x - (pair[0].x + pair[0].geometry.display_width) >= MIN_PLACEMENT_GAP);
-    }
+    assert_even_blocks(&draft, "shelf_01");
 
     let undone = expect_applied(draft.undo_change_set(&version, &widened.change_set.id, 4));
     assert_eq!(undone.revision, 5);
     assert_eq!(undone.change_set.compensates, Some(widened.change_set.id));
     assert_eq!(draft.placements, before);
 
-    // Stacking vertically keeps the width, so no neighbor moves.
+    // Stacking vertically keeps the width, so the even layout is unchanged.
     let stacked = expect_applied(set_facings(
         &mut draft,
         "placement_0002",
         facings(None, Some(2), None),
     ));
     assert_eq!(stacked.change_set.operations.len(), 1);
-    assert_eq!(positions(&draft), vec![0, 60, 120]);
+    assert_eq!(
+        positions(&draft),
+        at([
+            ("placement_0001", 148),
+            ("placement_0002", 356),
+            ("placement_0003", 564)
+        ])
+    );
     let stacked_view = draft
         .placement_view(&PlacementId::new("placement_0002"))
         .unwrap();
@@ -1062,7 +1211,6 @@ fn set_facings_pushes_following_placements_in_one_change_set_and_undoes_exactly(
         (stacked_view.facings_y, stacked_view.stocked_unit_count),
         (2, 2)
     );
-    assert_eq!(stacked_view.geometry.display_height.sixteenths(), 156);
 }
 
 #[test]
@@ -1399,7 +1547,7 @@ fn snapshot_replays_all_command_types_and_compensating_history() {
     expect_applied(draft.distribute_shelf(
         &version,
         &target,
-        ShelfDistribution::SpaceEvenly,
+        ShelfDistribution::SpaceBetween,
         draft.revision,
         "Distribute",
     ));

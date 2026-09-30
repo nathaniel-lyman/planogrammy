@@ -366,7 +366,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.add_product',
       title: 'Add product to shelf',
-      description: 'Adds one catalog product to a named shelf using the editor’s deterministic first-fit placement and physical validation. Tray-configured products use their catalog preset facings, units-deep count, and loaded tray envelope resolved by Rust. This changes the open draft, never publishes it, and returns a change set for review or undo.',
+      description: 'Adds one catalog product to a named shelf and validates it physically. The product joins an existing block of the same SKU on that shelf or starts a new block at the right end; Rust then re-spaces the shelf so each same-SKU block stays at the 1/8-inch minimum gap and the blocks are spaced evenly, recording every resulting move in the same change set. Tray-configured products use their catalog preset facings, units-deep count, and loaded tray envelope resolved by Rust. This changes the open draft, never publishes it, and returns a change set for review or undo.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -383,7 +383,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.distribute_shelf',
       title: 'Distribute products on shelf',
-      description: 'Reflows every product on one shelf as packed left, a centered group, space between, or space evenly. Rust preserves the current left-to-right order, resolves final coordinates on the 1/8-inch grid, enforces the 1/8-inch minimum product gap, and records one atomic change set.',
+      description: 'Reflows every product on one shelf as packed left, a centered group, space between, or space evenly. Neighboring placements of the same SKU form one block that always keeps the 1/8-inch minimum gap; spacing goes between blocks. Rust preserves the current left-to-right order, resolves final coordinates on the 1/8-inch grid, enforces the 1/8-inch minimum product gap, and records one atomic change set.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -465,7 +465,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.set_facings',
       title: 'Set product facings',
-      description: 'Sets the horizontal (facings_x), vertical (facings_y), and depth (facings_z) facing counts of one loose placement; omitted counts stay unchanged. The placement keeps its left edge. When it widens, Rust shifts the following products on the same shelf right only as far as the 1/8-inch minimum gap requires. Rust validates shelf bounds, vertical clearance, shelf depth, and the gap, then records one atomic change set or changes nothing. Loaded trays keep their catalog preset and reject any other facings.',
+      description: 'Sets the horizontal (facings_x), vertical (facings_y), and depth (facings_z) facing counts of one loose placement; omitted counts stay unchanged. Rust then re-spaces the shelf: same-SKU blocks stay at the 1/8-inch minimum gap and blocks are spaced evenly, and every resulting move is recorded with the facing change. Rust validates shelf bounds, vertical clearance, shelf depth, and the gap, then records one atomic change set or changes nothing. Loaded trays keep their catalog preset and reject any other facings.',
       inputSchema: {
         type: 'object',
         properties: {

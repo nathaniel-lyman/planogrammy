@@ -493,7 +493,7 @@ Tools operate on the currently open, authenticated editor session. Closing the p
 6. `add_product` — place an item relative to another placement or within a shelf or section.
 7. `remove_product` — remove one or more placements.
 8. `move_product` — move relative to another product, shelf, section, or physical location.
-9. `set_facings` — update horizontal, vertical, or depth facings of one placement; omitted counts stay unchanged, the left edge stays fixed, and Rust shifts following placements right only as far as the minimum gap requires, all in one change set.
+9. `set_facings` — update horizontal, vertical, or depth facings of one placement; omitted counts stay unchanged and Rust re-spaces the shelf in the default block layout, all in one change set.
 10. `swap_product` — substitute one SKU while attempting to preserve location.
 11. `reflow_section` — close gaps and reorder deterministically under declared constraints.
 12. `preview_shelf_allocation` — ask Rust to maximize and balance loose-product horizontal facings for a shelf while preserving stable order, tray presets, minimum gaps, and grid-aligned residual distribution; this is non-mutating.
@@ -560,7 +560,7 @@ The primary editor is a 2D front elevation that supports:
 - Product-image or placeholder rendering.
 - Single and multi-selection.
 - Drag preview and deterministic snapping.
-- Rust-owned packed-left, centered, space-between, and space-evenly shelf distribution.
+- Rust-owned packed-left, centered, space-between, and space-evenly shelf distribution that keeps same-SKU blocks tight. Adds, removals and facing changes re-space the shelf with evenly spaced blocks by default.
 - Collision, overflow, and rule overlays.
 - Semantic zoom for dense planograms.
 - Keyboard-accessible movement and editing.

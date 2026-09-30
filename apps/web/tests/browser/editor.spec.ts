@@ -132,7 +132,8 @@ test('selects and removes a placement through the accessible command path, then 
   await openEditor(page);
   await addToShelf01(page);
 
-  const placement = placementAt(page, '0"');
+  // A lone tray is centered: Rust spaces shelf blocks evenly by default.
+  const placement = placementAt(page, '1\' 6 1/2"');
   await expect(placement).toBeVisible();
   await placement.click();
   await expect(page.getByRole('heading', { name: 'Jif Creamy Peanut Butter' })).toBeVisible();
@@ -153,41 +154,42 @@ test('selects and removes a placement through the accessible command path, then 
   await expectRevision(page, 3);
   await placement.click();
   await expect(page.getByText('placement_0001')).toBeVisible();
-  await expect(inspector.getByText('0"', { exact: true })).toBeVisible();
+  await expect(inspector.getByText('1\' 6 1/2"', { exact: true })).toBeVisible();
 });
 
 test('moves a selected placement by eighths and between shelves through one inspector command', async ({ page }) => {
   await openEditor(page);
   await addToShelf01(page);
 
-  const placement = placementAt(page, '0"');
+  const placement = placementAt(page, '1\' 6 1/2"');
   await placement.click();
   const position = page.getByLabel('Position', { exact: true });
   const shelf = page.getByLabel('Shelf', { exact: true });
   const apply = page.locator('.placement-form').getByRole('button', { name: 'Apply' });
-  await expect(position).toHaveValue('0"');
+  await expect(position).toHaveValue('1\' 6 1/2"');
 
+  // Manual moves keep their exact position; they never re-apply the layout.
   await placement.press('ArrowRight');
-  await expect(position).toHaveValue('1/8"');
+  await expect(position).toHaveValue('1\' 6 5/8"');
   await expectRevision(page, 2);
 
-  await position.fill('1/16"');
+  await position.fill('1\' 6 9/16"');
   await apply.click();
   await expect(page.getByRole('alert')).toContainText('1/8-inch increments');
   await expectRevision(page, 2);
-  await expect(position).toHaveValue('1/8"');
+  await expect(position).toHaveValue('1\' 6 5/8"');
 
   await shelf.selectOption('shelf_02');
   await apply.click();
   await expectRevision(page, 3);
   await expect(shelf).toHaveValue('shelf_02');
   await expect(page.getByText('shelf_02', { exact: true })).toBeVisible();
-  await expect(placementAt(page, '1/8"')).toBeVisible();
+  await expect(placementAt(page, '1\' 6 5/8"')).toBeVisible();
 
   await page.getByRole('button', { name: 'Undo' }).click();
   await expectRevision(page, 4);
   await expect(shelf).toHaveValue('shelf_01');
-  await expect(position).toHaveValue('1/8"');
+  await expect(position).toHaveValue('1\' 6 5/8"');
 });
 
 test('registers site tools and applies the first WebMCP write through the live page session', async ({ page }) => {
@@ -235,13 +237,13 @@ test('registers site tools and applies the first WebMCP write through the live p
   });
 
   const added = await callSiteToolOrSkip(page, 'planogram.add_product', { product_id: 'jif_creamy_16', shelf_id: 'shelf_01', expected_revision: 0, reason: 'browser contract test' });
-  expect(added).toMatchObject({ status: 'applied', revision: 1, change_set: { actor: 'webmcp' }, placement: { shelf_id: 'shelf_01', x_sixteenths: 0, stocking_mode: 'tray', stocked_unit_count: 12, display_width_sixteenths: 175, display_height_sixteenths: 80, required_depth_sixteenths: 232 } });
+  expect(added).toMatchObject({ status: 'applied', revision: 1, change_set: { actor: 'webmcp' }, placement: { shelf_id: 'shelf_01', x_sixteenths: 296, stocking_mode: 'tray', stocked_unit_count: 12, display_width_sixteenths: 175, display_height_sixteenths: 80, required_depth_sixteenths: 232 } });
   await expectRevision(page, 1);
-  await expect(placementAt(page, '0"')).toBeVisible();
+  await expect(placementAt(page, '1\' 6 1/2"')).toBeVisible();
 
   expect(await callSiteTool(page, 'planogram.undo_change_set', { change_set_id: 'change_0001', expected_revision: 1 })).toMatchObject({ status: 'applied', revision: 2, change_set: { actor: 'webmcp' } });
   await expectRevision(page, 2);
-  await expect(placementAt(page, '0"')).not.toBeVisible();
+  await expect(placementAt(page, '1\' 6 1/2"')).not.toBeVisible();
 });
 
 test('previews a WebMCP proposal and records truthful human approval in the review UI', async ({ page }) => {
@@ -258,7 +260,7 @@ test('previews a WebMCP proposal and records truthful human approval in the revi
   expect(preview).toMatchObject({ status: 'ready', revision: 0, proposal_id: 'proposal_0001' });
   await expectRevision(page, 0);
   await expect(page.getByText('Proposal ready · 2 changes')).toBeVisible();
-  await expect(page.getByText(/Add Jif Creamy Peanut Butter \(16 oz\) to Shelf 01 at 0"/)).toBeVisible();
+  await expect(page.getByText(/Add Jif Creamy Peanut Butter \(16 oz\) to Shelf 01 at 1' 6 1\/2"/)).toBeVisible();
 
   await page.getByRole('button', { name: 'Accept proposal' }).click();
   await expectRevision(page, 1);
@@ -270,7 +272,7 @@ test('previews a WebMCP proposal and records truthful human approval in the revi
   for (const text of ['Group Jif by package size', 'human', '0 → 1', 'change_0001', '2']) {
     await expect(receipt.getByText(text, { exact: true })).toBeVisible();
   }
-  await expect(placementAt(page, '0"')).toBeVisible();
+  await expect(placementAt(page, '1\' 6 1/2"')).toBeVisible();
 });
 
 test('fills a shelf through one semantic WebMCP proposal and undoes the atomic reflow', async ({ page }) => {
@@ -306,36 +308,38 @@ test('fills a shelf through one semantic WebMCP proposal and undoes the atomic r
   await page.getByRole('button', { name: 'Undo' }).click();
   await expectRevision(page, 3);
   expect(await shelf01Placements(page)).toMatchObject([
-    { x_sixteenths: 0, facings_x: 1 },
-    { x_sixteenths: 70, facings_x: 1 },
     { x_sixteenths: 140, facings_x: 1 },
+    { x_sixteenths: 350, facings_x: 1 },
+    { x_sixteenths: 560, facings_x: 1 },
   ]);
 });
 
-test('enforces the product gap and distributes a shelf evenly as one undoable change', async ({ page }) => {
+test('keeps same-product trays in one tight block, applies an explicit distribution, and enforces the gap', async ({ page }) => {
   await openEditor(page);
   await addToShelf01(page, 2);
-  await expect(placementAt(page, '0"')).toBeVisible();
-  await expect(placementAt(page, '11 1/8"')).toBeVisible();
+  // Two trays of the same SKU form one block at the minimum gap, spaced evenly as a unit.
+  await expect(placementAt(page, '1\' 1"')).toBeVisible();
+  await expect(placementAt(page, '2\' 1/8"')).toBeVisible();
 
   await expect(page.getByLabel('Product distribution')).toHaveValue('space_evenly');
+  await page.getByLabel('Product distribution').selectOption('space_between');
   await page.locator('.distribution-form').getByRole('button', { name: 'Apply' }).click();
   await expectRevision(page, 3);
-  await expect(placementAt(page, '8 5/8"')).toBeVisible();
-  await expect(placementAt(page, '2\' 4 3/8"')).toBeVisible();
+  await expect(placementAt(page, '1\' 7/8"')).toBeVisible();
+  await expect(placementAt(page, '2\'')).toBeVisible();
 
   await page.getByRole('button', { name: 'Undo' }).click();
   await expectRevision(page, 4);
-  await placementAt(page, '11 1/8"').click();
+  await placementAt(page, '2\' 1/8"').click();
   const position = page.getByLabel('Position', { exact: true });
-  await position.fill('11"');
+  await position.fill('2\'');
   await page.locator('.placement-form').getByRole('button', { name: 'Apply' }).click();
   await expect(page.getByRole('alert')).toContainText('at least a 1/8-inch gap');
   await expectRevision(page, 4);
-  await expect(position).toHaveValue('11 1/8"');
+  await expect(position).toHaveValue('2\' 1/8"');
 });
 
-test('sets loose facings from the inspector and keyboard, pushes neighbors, rejects overflow, and undoes exactly', async ({ page }) => {
+test('sets loose facings from the inspector and keyboard, re-spaces the shelf, rejects overflow, and undoes exactly', async ({ page }) => {
   await openEditor(page);
   await page.getByLabel('Filter by stocking mode').selectOption('loose');
   await page.getByRole('button', { name: /^Jif Extra Crunchy Peanut Butter 16 oz/ }).click();
@@ -347,21 +351,22 @@ test('sets loose facings from the inspector and keyboard, pushes neighbors, reje
 
   const companion = page.locator('.companion');
   const crunchy = (position: string, facings: string) => companion.getByRole('button', { name: new RegExp(`Jif Extra Crunchy Peanut Butter.*at ${position} · Loose · ${facings} facings`) });
-  await expect(crunchy('3 3/4"', '1 × 1 × 1')).toBeVisible();
+  // Two units of one SKU form a single tight block spaced evenly on the shelf.
+  await expect(crunchy('2\' 1/8"', '1 × 1 × 1')).toBeVisible();
 
-  await crunchy('0"', '1 × 1 × 1').click();
+  await crunchy('1\' 8 3/8"', '1 × 1 × 1').click();
   await page.getByLabel('Wide').fill('3');
   await page.getByRole('button', { name: 'Apply facings' }).click();
   await expectRevision(page, 3);
-  await expect(crunchy('0"', '3 × 1 × 1')).toBeVisible();
-  await expect(crunchy('10 7/8"', '1 × 1 × 1')).toBeVisible();
+  await expect(crunchy('1\' 4 3/4"', '3 × 1 × 1')).toBeVisible();
+  await expect(crunchy('2\' 3 5/8"', '1 × 1 × 1')).toBeVisible();
 
-  const lead = crunchy('0"', '3 × 1 × 1');
+  const lead = crunchy('1\' 4 3/4"', '3 × 1 × 1');
   await lead.focus();
   await lead.press('-');
   await expectRevision(page, 4);
-  await expect(crunchy('0"', '2 × 1 × 1')).toBeVisible();
-  await expect(crunchy('10 7/8"', '1 × 1 × 1')).toBeVisible();
+  await expect(crunchy('1\' 6 5/8"', '2 × 1 × 1')).toBeVisible();
+  await expect(crunchy('2\' 1 7/8"', '1 × 1 × 1')).toBeVisible();
 
   await page.getByLabel('High').fill('3');
   await page.getByRole('button', { name: 'Apply facings' }).click();
@@ -371,17 +376,17 @@ test('sets loose facings from the inspector and keyboard, pushes neighbors, reje
   const undo = page.getByRole('button', { name: 'Undo' });
   await undo.click();
   await expectRevision(page, 5);
-  await expect(crunchy('0"', '3 × 1 × 1')).toBeVisible();
+  await expect(crunchy('1\' 4 3/4"', '3 × 1 × 1')).toBeVisible();
   await undo.click();
   await expectRevision(page, 6);
-  await expect(crunchy('0"', '1 × 1 × 1')).toBeVisible();
-  await expect(crunchy('3 3/4"', '1 × 1 × 1')).toBeVisible();
+  await expect(crunchy('1\' 8 3/8"', '1 × 1 × 1')).toBeVisible();
+  await expect(crunchy('2\' 1/8"', '1 × 1 × 1')).toBeVisible();
 });
 
 test('keeps loaded tray facings fixed in the inspector and through WebMCP', async ({ page }) => {
   await openEditorWithSiteTools(page);
   await addToShelf01(page);
-  await placementAt(page, '0"').click();
+  await placementAt(page, '1\' 6 1/2"').click();
   for (const control of [page.getByLabel('Wide'), page.getByLabel('High'), page.getByLabel('Deep'), page.getByRole('button', { name: 'Add one horizontal facing' }), page.getByRole('button', { name: 'Apply facings' })]) {
     await expect(control).toBeDisabled();
   }
@@ -604,4 +609,63 @@ test('cereal cross-bay movement is atomic and undoable; baseline and corrupted f
   original.document.alternatives[0].draft.scenario_origin.bay_count=8;
   await openBayText(page,JSON.stringify(original));await expect(page.locator('.file-feedback[role="alert"]')).toContainText('Invalid six-bay');
   await expect(page.getByRole('combobox',{name:'Scenario alternative'})).toHaveValue('-1');
+});
+
+test('shelf validation belongs to its form and clears after correction, selection or another command', async ({ page }, testInfo) => {
+  await openEditor(page);
+  await addToShelf01(page);
+  const elevation = page.getByLabel('Elevation', { exact: true });
+  const applyElevation = page.locator('.elevation-form').getByRole('button', { name: 'Apply' });
+  const applyDistribution = page.locator('.distribution-form').getByRole('button', { name: 'Apply' });
+  const elevationError = page.locator('#elevation-error');
+  const distributionError = page.locator('#distribution-error');
+
+  // This is a Rust rejection, not a UI parser error. The shelf must stay put.
+  await elevation.fill('12 1/2');
+  await applyElevation.click();
+  await expectRevision(page, 1);
+  await expect(elevationError).toContainText('1-inch increments');
+  await expect(page.locator('.selection-panel [role="alert"]')).toHaveCount(1);
+  await expect(distributionError).toHaveCount(0);
+  await expect(elevation).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByLabel('Product distribution')).toHaveAttribute('aria-invalid', 'false');
+  await page.screenshot({ path: testInfo.outputPath('scoped-elevation-validation.png') });
+  await testInfo.attach('Elevation validation only under Elevation', { path: testInfo.outputPath('scoped-elevation-validation.png'), contentType: 'image/png' });
+
+  await elevation.fill('13');
+  await applyElevation.click();
+  await expectRevision(page, 2);
+  await expect(page.locator('.selection-panel [role="alert"]')).toHaveCount(0);
+  await expect(elevation).toHaveAttribute('aria-invalid', 'false');
+  await expect(elevation).toHaveAttribute('aria-describedby', 'elevation-help');
+
+  // Local parser failures use the same form scope and do not survive selection.
+  await elevation.fill('not a length');
+  await applyElevation.click();
+  await expect(elevationError).toBeVisible();
+  await expect(distributionError).toHaveCount(0);
+  await expectRevision(page, 2);
+  await page.getByRole('button', { name: /^Shelf 02/ }).click();
+  await expect(page.locator('.selection-panel [role="alert"]')).toHaveCount(0);
+  await page.getByRole('button', { name: /^Shelf 01/ }).click();
+  await expect(elevationError).toHaveCount(0);
+
+  // A no-op distribution reports in Distribution, never in Elevation.
+  await applyDistribution.click();
+  await expect(distributionError).toContainText('already');
+  await expect(elevationError).toHaveCount(0);
+  await expectRevision(page, 2);
+  await expect(page.getByLabel('Product distribution')).toHaveAttribute('aria-invalid', 'true');
+  await page.getByLabel('Product distribution').selectOption('packed_left');
+  await applyDistribution.click();
+  await expectRevision(page, 3);
+  await expect(page.locator('.selection-panel [role="alert"]')).toHaveCount(0);
+
+  // Successful commands outside the failed form clear its stale feedback too.
+  await elevation.fill('13 1/2');
+  await applyElevation.click();
+  await expect(elevationError).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expectRevision(page, 4);
+  await expect(page.locator('.selection-panel [role="alert"]')).toHaveCount(0);
 });

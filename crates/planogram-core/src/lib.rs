@@ -381,8 +381,8 @@ pub enum PlacementChange {
         facings_y: u32,
         facings_z: u32,
     },
-    /// Changes facing counts in place. The left edge stays fixed; any
-    /// neighbor pushes are separate exact `Move` changes in the same proposal.
+    /// Changes facing counts in place. Any re-spacing, including a shift of
+    /// this placement, is a separate exact `Move` in the same proposal.
     SetFacings {
         placement_id: PlacementId,
         facings: PlacementFacings,
@@ -602,6 +602,25 @@ pub enum PreviewResult {
     InvalidCommand {
         message: String,
     },
+}
+
+/// How touched shelves are laid out after a placement proposal is applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShelfLayout {
+    /// Keep every recorded or resolved position exactly (undo, file replay,
+    /// explicit distribution and allocation results). Shelves are only
+    /// repacked when a change carries no position at all.
+    Recorded,
+    /// Semantic edits: shelves whose contents change are re-spaced with
+    /// same-SKU blocks tightly packed and the blocks spaced evenly.
+    EvenBlocks,
+}
+
+/// Attribution and undo linkage recorded together for one committed change set.
+struct ChangeSetMetadata {
+    actor: String,
+    reason: String,
+    compensates: Option<ChangeSetId>,
 }
 
 struct PreparedPlacementChanges {
@@ -1573,7 +1592,10 @@ impl DraftVersion {
             };
             widths.push(Self::display_width(placement, product));
         }
-        let Some(positions) = resolve_shelf_distribution(&widths, shelf.width, distribution) else {
+        let joined = same_sku_runs(ordered.iter().map(|placement| &placement.product_id));
+        let Some(positions) =
+            resolve_block_distribution(&widths, &joined, shelf.width, distribution)
+        else {
             return CommandResult::ValidationFailed {
                 revision: self.revision,
                 validation: ValidationSummary {
@@ -1607,9 +1629,12 @@ impl DraftVersion {
             version_id,
             &changes,
             expected_revision,
-            actor.into(),
-            reason.into(),
-            None,
+            ChangeSetMetadata {
+                actor: actor.into(),
+                reason: reason.into(),
+                compensates: None,
+            },
+            ShelfLayout::Recorded,
         )
     }
 
@@ -1706,9 +1731,12 @@ impl DraftVersion {
             version_id,
             &changes,
             expected_revision,
-            actor.into(),
-            reason.into(),
-            None,
+            ChangeSetMetadata {
+                actor: actor.into(),
+                reason: reason.into(),
+                compensates: None,
+            },
+            ShelfLayout::Recorded,
         )
     }
 
@@ -1827,9 +1855,18 @@ impl DraftVersion {
             .iter()
             .map(|(placement, product, _)| Self::display_width(placement, product))
             .collect::<Vec<_>>();
-        let positions =
-            resolve_shelf_distribution(&widths, shelf.width, ShelfDistribution::SpaceEvenly)
-                .expect("validated allocation fits its shelf");
+        let joined = same_sku_runs(
+            planned
+                .iter()
+                .map(|(placement, _, _)| &placement.product_id),
+        );
+        let positions = resolve_block_distribution(
+            &widths,
+            &joined,
+            shelf.width,
+            ShelfDistribution::SpaceEvenly,
+        )
+        .expect("validated allocation fits its shelf");
         let changes = planned
             .into_iter()
             .zip(positions)
@@ -1880,10 +1917,9 @@ impl DraftVersion {
         )
     }
 
-    /// Changes one placement's facing counts. The placement keeps its left
-    /// edge; when it widens, following placements on the same shelf shift
-    /// right only as far as the minimum gap requires. The facing change and
-    /// every resulting shift commit as one change set or not at all.
+    /// Changes one placement's facing counts, then re-spaces its shelf with
+    /// same-SKU blocks tightly packed and the blocks spaced evenly. The facing
+    /// change and every resulting shift commit as one change set or not at all.
     pub fn set_facings_as(
         &mut self,
         version_id: &VersionId,
@@ -1918,9 +1954,12 @@ impl DraftVersion {
             version_id,
             &changes,
             expected_revision,
-            actor.into(),
-            reason.into(),
-            None,
+            ChangeSetMetadata {
+                actor: actor.into(),
+                reason: reason.into(),
+                compensates: None,
+            },
+            ShelfLayout::Recorded,
         )
     }
 
@@ -1994,49 +2033,61 @@ impl DraftVersion {
             facings_z: after.facings_z,
             ..placement.clone()
         };
-        let mut following = self
+        let mut ordered = self
             .placements
             .iter()
-            .filter(|other| {
-                other.shelf_id == placement.shelf_id
-                    && (other.x, &other.id) > (placement.x, &placement.id)
+            .filter(|other| other.shelf_id == placement.shelf_id)
+            .map(|other| {
+                if other.id == resized.id {
+                    &resized
+                } else {
+                    other
+                }
             })
             .collect::<Vec<_>>();
-        following.sort_by(|left, right| left.x.cmp(&right.x).then_with(|| left.id.cmp(&right.id)));
-
-        let mut changes = vec![PlacementChange::SetFacings {
-            placement_id: placement_id.clone(),
-            facings: after,
-        }];
-        let mut end = resized.x + Self::display_width(&resized, product);
-        for other in following {
-            let earliest = align_to_eighth(end + MIN_PLACEMENT_GAP);
-            if other.x >= earliest {
-                break;
-            }
+        ordered.sort_by(|left, right| left.x.cmp(&right.x).then_with(|| left.id.cmp(&right.id)));
+        let mut widths = Vec::with_capacity(ordered.len());
+        for other in &ordered {
             let Some(other_product) = self.product(&other.product_id) else {
                 return Err(CommandResult::NotFound {
                     entity: "product".into(),
                     id: other.product_id.0.clone(),
                 });
             };
-            changes.push(PlacementChange::Move {
-                placement_id: other.id.clone(),
-                shelf_id: other.shelf_id.clone(),
-                sequence: 0,
-                resolved_x: Some(earliest),
-            });
-            end = earliest + Self::display_width(other, other_product);
+            widths.push(Self::display_width(other, other_product));
         }
-        if end > shelf.width {
+        let joined = same_sku_runs(ordered.iter().map(|other| &other.product_id));
+        let Some(positions) = resolve_block_distribution(
+            &widths,
+            &joined,
+            shelf.width,
+            ShelfDistribution::SpaceEvenly,
+        ) else {
             return Err(self.rejected(
                 ValidationCode::NoShelfCapacity,
                 &shelf.id,
                 format!(
-                    "{} horizontal facings of {} would push products past the shelf's right edge.",
+                    "{} horizontal facings of {} do not fit on this shelf with its other products.",
                     after.facings_x, product.description
                 ),
             ));
+        };
+
+        // The facing change plus every resulting shift, including the resized
+        // placement's own, commit together as exact resolved positions.
+        let mut changes = vec![PlacementChange::SetFacings {
+            placement_id: placement_id.clone(),
+            facings: after,
+        }];
+        for (other, x) in ordered.into_iter().zip(positions) {
+            if other.x != x {
+                changes.push(PlacementChange::Move {
+                    placement_id: other.id.clone(),
+                    shelf_id: other.shelf_id.clone(),
+                    sequence: 0,
+                    resolved_x: Some(x),
+                });
+            }
         }
         Ok(changes)
     }
@@ -2085,7 +2136,7 @@ impl DraftVersion {
                 message: "This version is not editable.".into(),
             };
         }
-        match self.prepare_placement_changes(changes) {
+        match self.prepare_placement_changes(changes, ShelfLayout::EvenBlocks) {
             Ok(prepared) => {
                 let preview_scene = Box::new(prepared.candidate.render_scene());
                 PreviewResult::Ready {
@@ -2142,9 +2193,12 @@ impl DraftVersion {
             version_id,
             changes,
             expected_revision,
-            actor.into(),
-            reason.into(),
-            None,
+            ChangeSetMetadata {
+                actor: actor.into(),
+                reason: reason.into(),
+                compensates: None,
+            },
+            ShelfLayout::EvenBlocks,
         )
     }
 
@@ -2153,9 +2207,8 @@ impl DraftVersion {
         version_id: &VersionId,
         changes: &[PlacementChange],
         expected_revision: u64,
-        actor: String,
-        reason: String,
-        compensates: Option<ChangeSetId>,
+        metadata: ChangeSetMetadata,
+        layout: ShelfLayout,
     ) -> CommandResult {
         if version_id != &self.id {
             return CommandResult::NotFound {
@@ -2174,17 +2227,23 @@ impl DraftVersion {
                 message: "This version is not editable.".into(),
             };
         }
-        let prepared = match self.prepare_placement_changes(changes) {
+        let prepared = match self.prepare_placement_changes(changes, layout) {
             Ok(prepared) => prepared,
             Err(result) => return result,
         };
-        self.apply_prepared_placement_changes(prepared, reason, actor, compensates)
+        self.apply_prepared_placement_changes(
+            prepared,
+            metadata.reason,
+            metadata.actor,
+            metadata.compensates,
+        )
     }
 
     #[allow(clippy::result_large_err)]
     fn prepare_placement_changes(
         &self,
         changes: &[PlacementChange],
+        layout: ShelfLayout,
     ) -> Result<PreparedPlacementChanges, CommandResult> {
         if changes.is_empty() {
             return Err(CommandResult::InvalidCommand {
@@ -2199,6 +2258,10 @@ impl DraftVersion {
         let mut touched_shelves = Vec::new();
         let mut shelf_orders = initial_shelf_orders(&candidate);
         let mut seen_placement_ids = Vec::new();
+        // A facing change may accompany one position change for the same
+        // placement (re-spacing can shift the resized placement itself), so
+        // facing and position claims are tracked separately.
+        let mut seen_facing_ids = Vec::new();
         let exact_positions = changes.iter().all(|change| match change {
             PlacementChange::Add { resolved_x, .. } | PlacementChange::Move { resolved_x, .. } => {
                 resolved_x.is_some()
@@ -2350,7 +2413,9 @@ impl DraftVersion {
                     facings_y,
                     facings_z,
                 } => {
-                    if seen_placement_ids.iter().any(|id| id == placement_id) {
+                    if seen_placement_ids.iter().any(|id| id == placement_id)
+                        || seen_facing_ids.iter().any(|id| id == placement_id)
+                    {
                         return Err(CommandResult::InvalidCommand {
                             message: format!(
                                 "Placement {} may only appear once in a proposal.",
@@ -2397,6 +2462,7 @@ impl DraftVersion {
                         placement_id: placement_id.clone(),
                         before,
                     });
+                    seen_facing_ids.push(placement_id.clone());
                     seen_placement_ids.push(placement_id.clone());
                     remove_from_shelf_orders(&mut shelf_orders, placement_id);
                     insert_shelf_order(
@@ -2413,7 +2479,9 @@ impl DraftVersion {
                     placement_id,
                     facings,
                 } => {
-                    if seen_placement_ids.iter().any(|id| id == placement_id) {
+                    if seen_facing_ids.iter().any(|id| id == placement_id)
+                        || removed_placement_ids.iter().any(|id| id == placement_id)
+                    {
                         return Err(CommandResult::InvalidCommand {
                             message: format!(
                                 "Placement {} may only appear once in a proposal.",
@@ -2440,12 +2508,14 @@ impl DraftVersion {
                         placement_id: placement_id.clone(),
                         before: placement.facings(),
                     });
-                    seen_placement_ids.push(placement_id.clone());
+                    seen_facing_ids.push(placement_id.clone());
                     push_unique(&mut touched_shelves, placement.shelf_id);
                     push_unique(&mut affected_ids, placement_id.0.clone());
                 }
                 PlacementChange::Remove { placement_id } => {
-                    if seen_placement_ids.iter().any(|id| id == placement_id) {
+                    if seen_placement_ids.iter().any(|id| id == placement_id)
+                        || seen_facing_ids.iter().any(|id| id == placement_id)
+                    {
                         return Err(CommandResult::InvalidCommand {
                             message: format!(
                                 "Placement {} may only appear once in a proposal.",
@@ -2476,8 +2546,16 @@ impl DraftVersion {
             }
         }
 
-        if !exact_positions {
+        let respace = !exact_positions
+            || (layout == ShelfLayout::EvenBlocks
+                && changes
+                    .iter()
+                    .any(|change| matches!(change, PlacementChange::Remove { .. })));
+        if respace {
             for shelf_id in &touched_shelves {
+                let Some(shelf_width) = candidate.shelf(shelf_id).map(|shelf| shelf.width) else {
+                    continue;
+                };
                 let ordered_ids = shelf_orders
                     .iter()
                     .find(|(candidate_shelf, _)| candidate_shelf == shelf_id)
@@ -2492,18 +2570,40 @@ impl DraftVersion {
                             .position(|placement| &placement.id == id)
                     })
                     .collect();
-                let mut next_x = Length::ZERO;
-                for index in indices {
-                    let placement = &mut candidate.placements[index];
-                    placement.x = next_x;
-                    let product = candidate
-                        .products
+                let widths = indices
+                    .iter()
+                    .map(|index| {
+                        let placement = &candidate.placements[*index];
+                        let product = candidate
+                            .product(&placement.product_id)
+                            .expect("validated product exists");
+                        Self::display_width(placement, product)
+                    })
+                    .collect::<Vec<_>>();
+                let joined = same_sku_runs(
+                    indices
                         .iter()
-                        .find(|product| product.id == placement.product_id)
-                        .expect("validated product exists");
-                    next_x = align_to_eighth(
-                        placement.x + Self::display_width(placement, product) + MIN_PLACEMENT_GAP,
-                    );
+                        .map(|index| &candidate.placements[*index].product_id),
+                );
+                // An overfull shelf keeps its packed order so validation can
+                // report the overflow against the exact resolved proposal.
+                let positions = resolve_block_distribution(
+                    &widths,
+                    &joined,
+                    shelf_width,
+                    ShelfDistribution::SpaceEvenly,
+                )
+                .or_else(|| {
+                    resolve_block_distribution(
+                        &widths,
+                        &joined,
+                        Length::from_sixteenths(i32::MAX / 2),
+                        ShelfDistribution::PackedLeft,
+                    )
+                })
+                .expect("packing without a width limit always resolves");
+                for (index, x) in indices.into_iter().zip(positions) {
+                    candidate.placements[index].x = x;
                 }
             }
         }
@@ -2915,9 +3015,12 @@ impl DraftVersion {
                 version_id,
                 &inverse,
                 expected_revision,
-                actor,
-                format!("Undo {}", change_set.id.0),
-                Some(change_set.id),
+                ChangeSetMetadata {
+                    actor,
+                    reason: format!("Undo {}", change_set.id.0),
+                    compensates: Some(change_set.id),
+                },
+                ShelfLayout::Recorded,
             );
         }
         match change_set.operations.first() {
@@ -3042,7 +3145,7 @@ impl DraftVersion {
                     };
                 }
             };
-        let mut placement = Placement {
+        let placement = Placement {
             id: PlacementId::new(format!("placement_{:04}", self.next_placement)),
             product_id: product.id.clone(),
             shelf_id: shelf_id.clone(),
@@ -3082,35 +3185,38 @@ impl DraftVersion {
                 message: format!("{} does not fit below the next shelf.", product.description),
             });
         }
-        let mut occupied = self
+        // Join an existing block of the same SKU; otherwise start a new block
+        // at the right end. Rust then re-spaces the shelf's blocks evenly.
+        let mut ordered = self
             .placements
             .iter()
             .filter(|placement| placement.shelf_id == *shelf_id)
-            .filter_map(|placement| {
-                let placed = self
-                    .products
-                    .iter()
-                    .find(|candidate| candidate.id == placement.product_id)?;
-                Some((
-                    placement.x,
-                    placement.x + Self::display_width(placement, placed),
-                ))
-            })
             .collect::<Vec<_>>();
-        occupied.sort_by_key(|(start, _)| *start);
-        let mut x = Length::ZERO;
-        for (start, end) in occupied {
-            if x + placement_view.geometry.display_width + MIN_PLACEMENT_GAP <= start {
-                break;
-            }
-            x = x.max(align_to_eighth(end + MIN_PLACEMENT_GAP));
+        ordered.sort_by(|left, right| left.x.cmp(&right.x).then_with(|| left.id.cmp(&right.id)));
+        let sequence = ordered
+            .iter()
+            .rposition(|placed| placed.product_id == product.id)
+            .map_or(ordered.len(), |index| index + 1);
+        let mut widths = Vec::with_capacity(ordered.len() + 1);
+        for placed in &ordered {
+            let Some(placed_product) = self.product(&placed.product_id) else {
+                return CommandResult::NotFound {
+                    entity: "product".into(),
+                    id: placed.product_id.0.clone(),
+                };
+            };
+            widths.push(Self::display_width(placed, placed_product));
         }
-        if x + placement_view.geometry.display_width > shelf.width {
+        widths.insert(sequence, placement_view.geometry.display_width);
+        let joined = vec![false; widths.len()];
+        if resolve_block_distribution(&widths, &joined, shelf.width, ShelfDistribution::PackedLeft)
+            .is_none()
+        {
             validation.issues.push(ValidationIssue {
                 code: ValidationCode::NoShelfCapacity,
                 shelf_id: Some(shelf_id.clone()),
                 message: format!(
-                    "No contiguous space remains for {} on this shelf.",
+                    "No space remains for {} on this shelf.",
                     product.description
                 ),
             });
@@ -3121,9 +3227,26 @@ impl DraftVersion {
                 validation,
             };
         }
-        placement.x = x;
-        self.next_placement += 1;
-        self.apply_add_placement(placement, reason.into(), actor, None)
+        self.apply_placement_changes_with_compensation(
+            version_id,
+            &[PlacementChange::Add {
+                placement_id: None,
+                product_id: placement.product_id,
+                shelf_id: placement.shelf_id,
+                sequence: sequence as u32,
+                resolved_x: None,
+                facings_x: Some(placement.facings_x),
+                facings_y: Some(placement.facings_y),
+                facings_z: Some(placement.facings_z),
+            }],
+            expected_revision,
+            ChangeSetMetadata {
+                actor,
+                reason: reason.into(),
+                compensates: None,
+            },
+            ShelfLayout::EvenBlocks,
+        )
     }
 
     pub fn remove_placement(
@@ -3172,101 +3295,19 @@ impl DraftVersion {
                 id: placement_id.0.clone(),
             };
         }
-        self.apply_remove_placement(placement_id, reason.into(), actor, None)
-    }
-
-    fn apply_add_placement(
-        &mut self,
-        placement: Placement,
-        reason: String,
-        actor: String,
-        compensates: Option<ChangeSetId>,
-    ) -> CommandResult {
-        self.placements.push(placement.clone());
-        let base_revision = self.revision;
-        self.revision += 1;
-        let change_set = ChangeSet {
-            id: ChangeSetId::new(format!("change_{:04}", self.next_change_set)),
-            actor,
-            reason,
-            base_revision,
-            resulting_revision: self.revision,
-            operations: vec![PlanogramOperation::AddPlacement(AddPlacement {
-                placement: placement.clone(),
-            })],
-            compensates,
-        };
-        self.next_change_set += 1;
-        self.change_sets.push(change_set.clone());
-        let node = self
-            .render_scene()
-            .placements
-            .into_iter()
-            .find(|node| node.id == placement.id)
-            .expect("placed product rendered");
-        let validation = ValidationSummary::default();
-        CommandResult::Applied {
-            revision: self.revision,
-            affected_ids: vec![placement.id.0.clone()],
-            scene_patch: Box::new(ScenePatch {
-                revision: self.revision,
-                shelves: Vec::new(),
-                placements: vec![node],
-                removed_placement_ids: Vec::new(),
-                validation: validation.clone(),
-            }),
-            validation,
-            change_set,
-        }
-    }
-
-    fn apply_remove_placement(
-        &mut self,
-        placement_id: &PlacementId,
-        reason: String,
-        actor: String,
-        compensates: Option<ChangeSetId>,
-    ) -> CommandResult {
-        let Some(index) = self
-            .placements
-            .iter()
-            .position(|placement| &placement.id == placement_id)
-        else {
-            return CommandResult::NotFound {
-                entity: "placement".into(),
-                id: placement_id.0.clone(),
-            };
-        };
-        let placement = self.placements.remove(index);
-        let base_revision = self.revision;
-        self.revision += 1;
-        let change_set = ChangeSet {
-            id: ChangeSetId::new(format!("change_{:04}", self.next_change_set)),
-            actor,
-            reason,
-            base_revision,
-            resulting_revision: self.revision,
-            operations: vec![PlanogramOperation::RemovePlacement(RemovePlacement {
-                placement: placement.clone(),
-            })],
-            compensates,
-        };
-        self.next_change_set += 1;
-        self.change_sets.push(change_set.clone());
-        let validation = ValidationSummary::default();
-        CommandResult::Applied {
-            revision: self.revision,
-            affected_ids: vec![placement.id.0.clone()],
-            scene_patch: Box::new(ScenePatch {
-                revision: self.revision,
-                shelves: Vec::new(),
-                placements: Vec::new(),
-                removed_placement_ids: vec![placement.id],
-                validation: validation.clone(),
-            }),
-            validation,
-            change_set,
-        }
+        self.apply_placement_changes_with_compensation(
+            version_id,
+            &[PlacementChange::Remove {
+                placement_id: placement_id.clone(),
+            }],
+            expected_revision,
+            ChangeSetMetadata {
+                actor,
+                reason: reason.into(),
+                compensates: None,
+            },
+            ShelfLayout::EvenBlocks,
+        )
     }
 }
 
@@ -3350,11 +3391,47 @@ fn distribute_steps(total_steps: i32, slots: usize) -> Vec<i32> {
         .collect()
 }
 
+/// Lays out one item per width with every item its own block. Kept for callers
+/// and tests that reason about individual placements.
+#[cfg(test)]
 fn resolve_shelf_distribution(
     widths: &[Length],
     shelf_width: Length,
     distribution: ShelfDistribution,
 ) -> Option<Vec<Length>> {
+    resolve_block_distribution(
+        widths,
+        &vec![false; widths.len()],
+        shelf_width,
+        distribution,
+    )
+}
+
+/// `joined[i]` is true when item `i` continues the block of item `i - 1`
+/// (neighboring placements of the same SKU).
+fn same_sku_runs<'a>(product_ids: impl IntoIterator<Item = &'a ProductId>) -> Vec<bool> {
+    let mut previous: Option<&ProductId> = None;
+    product_ids
+        .into_iter()
+        .map(|id| {
+            let joined = previous == Some(id);
+            previous = Some(id);
+            joined
+        })
+        .collect()
+}
+
+/// Resolves exact left edges in stable order. Items inside a block always keep
+/// the minimum gap; distribution slack is placed only between blocks and, for
+/// space-evenly, at the shelf ends. With single-item blocks this is the plain
+/// per-placement distribution, which recorded cereal genesis data depends on.
+fn resolve_block_distribution(
+    widths: &[Length],
+    joined: &[bool],
+    shelf_width: Length,
+    distribution: ShelfDistribution,
+) -> Option<Vec<Length>> {
+    debug_assert_eq!(widths.len(), joined.len());
     if widths.is_empty() {
         return Some(Vec::new());
     }
@@ -3369,34 +3446,42 @@ fn resolve_shelf_distribution(
         return None;
     }
     let slack = shelf_width - packed_end;
+    let block_count = 1 + joined.iter().skip(1).filter(|joined| !**joined).count();
+    let shift_all = |positions: &mut Vec<Length>, offset: Length| {
+        for position in positions.iter_mut() {
+            *position = *position + offset;
+        }
+    };
+    // Adds `bonuses[k]` steps at the start of block k (k >= 1), cumulatively.
+    let spread = |positions: &mut Vec<Length>, bonuses: &[i32], first_boundary: usize| {
+        let mut accumulated = 0;
+        let mut boundary = first_boundary;
+        for (index, position) in positions.iter_mut().enumerate().skip(1) {
+            if !joined[index] {
+                accumulated += bonuses[boundary] * 2;
+                boundary += 1;
+            }
+            *position = *position + Length::from_sixteenths(accumulated);
+        }
+    };
     match distribution {
         ShelfDistribution::PackedLeft => {}
         ShelfDistribution::Centered => {
             let offset = align_down_to_eighth(Length::from_sixteenths(slack.sixteenths() / 2));
-            for position in &mut positions {
-                *position = *position + offset;
-            }
+            shift_all(&mut positions, offset);
         }
-        ShelfDistribution::SpaceBetween if widths.len() == 1 => {
+        ShelfDistribution::SpaceBetween if block_count == 1 => {
             let offset = align_down_to_eighth(Length::from_sixteenths(slack.sixteenths() / 2));
-            positions[0] = offset;
+            shift_all(&mut positions, offset);
         }
         ShelfDistribution::SpaceBetween => {
-            let bonuses = distribute_steps(slack.sixteenths() / 2, widths.len() - 1);
-            let mut accumulated = 0;
-            for (index, position) in positions.iter_mut().enumerate().skip(1) {
-                accumulated += bonuses[index - 1] * 2;
-                *position = *position + Length::from_sixteenths(accumulated);
-            }
+            let bonuses = distribute_steps(slack.sixteenths() / 2, block_count - 1);
+            spread(&mut positions, &bonuses, 0);
         }
         ShelfDistribution::SpaceEvenly => {
-            let bonuses = distribute_steps(slack.sixteenths() / 2, widths.len() + 1);
-            let mut accumulated = bonuses[0] * 2;
-            positions[0] = positions[0] + Length::from_sixteenths(accumulated);
-            for (index, position) in positions.iter_mut().enumerate().skip(1) {
-                accumulated += bonuses[index] * 2;
-                *position = *position + Length::from_sixteenths(accumulated);
-            }
+            let bonuses = distribute_steps(slack.sixteenths() / 2, block_count + 1);
+            shift_all(&mut positions, Length::from_sixteenths(bonuses[0] * 2));
+            spread(&mut positions, &bonuses, 1);
         }
     }
     Some(positions)
