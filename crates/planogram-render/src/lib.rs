@@ -62,6 +62,15 @@ impl RenderModel {
         }
     }
 
+    pub fn replace_scene(&mut self, scene: RenderScene) {
+        self.scene = scene;
+        self.selected = None;
+        self.drag = None;
+        self.validation_error = None;
+        self.clear_proposal_preview();
+        self.fit();
+    }
+
     pub fn resize(&mut self, width: f32, height: f32) {
         self.viewport_width = width.max(1.0);
         self.viewport_height = height.max(1.0);
@@ -75,8 +84,36 @@ impl RenderModel {
         };
     }
 
+    /// Frame the bay containing this shelf without changing committed geometry.
+    pub fn focus_bay(&mut self, shelf_id: &ShelfId) -> bool {
+        let Some(shelf) = self
+            .scene
+            .shelves
+            .iter()
+            .find(|shelf| &shelf.id == shelf_id)
+        else {
+            return false;
+        };
+        let bay_width = shelf.width.sixteenths() as f32;
+        let bay_center = shelf.x.sixteenths() as f32 + bay_width / 2.0;
+        let scale = ((self.viewport_width - 180.0).max(120.0) / bay_width)
+            .min((self.viewport_height - 220.0).max(180.0) / self.scene.height.sixteenths() as f32);
+        let base_scale = self.fit_scale() / self.camera.zoom;
+        self.camera.zoom = (scale / base_scale).clamp(0.35, 16.0);
+        self.camera.pan_x =
+            (self.scene.width.sixteenths() as f32 / 2.0 - bay_center) * self.fit_scale();
+        self.camera.pan_y = 0.0;
+        true
+    }
+
     pub fn zoom_by(&mut self, factor: f32) {
-        self.camera.zoom = (self.camera.zoom * factor).clamp(0.35, 5.0);
+        let previous_zoom = self.camera.zoom;
+        self.camera.zoom = (previous_zoom * factor).clamp(0.35, 16.0);
+        // Keep the world point at the viewport center fixed, including after
+        // focusing a bay far from the center of a multi-bay fixture.
+        let ratio = self.camera.zoom / previous_zoom;
+        self.camera.pan_x *= ratio;
+        self.camera.pan_y *= ratio;
     }
 
     pub fn pan_by(&mut self, dx: f32, dy: f32) {
@@ -177,9 +214,9 @@ impl RenderModel {
             else {
                 return false;
             };
-            let (x1, shelf_y) = self.world_to_screen(placement.x, shelf.elevation);
+            let (x1, shelf_y) = self.world_to_screen(shelf.x + placement.x, shelf.elevation);
             let (x2, product_top) = self.world_to_screen(
-                placement.x + placement.width,
+                shelf.x + placement.x + placement.width,
                 shelf.elevation + placement.height,
             );
             x >= x1 && x <= x2 && y >= product_top && y <= shelf_y
@@ -193,6 +230,13 @@ impl RenderModel {
         self.scene
             .shelves
             .iter()
+            .filter(|shelf| {
+                let left = self.world_to_screen(shelf.x, shelf.elevation).0;
+                let right = self
+                    .world_to_screen(shelf.x + shelf.width, shelf.elevation)
+                    .0;
+                x >= left && x <= right
+            })
             .min_by(|a, b| {
                 let ay = self.world_to_screen(Length::ZERO, a.elevation).1;
                 let by = self.world_to_screen(Length::ZERO, b.elevation).1;
@@ -442,50 +486,47 @@ mod webgpu {
             let mut vertices = Vec::new();
             let w = self.config.width as f32;
             let h = self.config.height as f32;
-            let (left, base_y) = self.model.world_to_screen(Length::ZERO, Length::ZERO);
-            let (right, top_y) = self
+            let (_, base_y) = self.model.world_to_screen(Length::ZERO, Length::ZERO);
+            let (_, top_y) = self
                 .model
                 .world_to_screen(self.model.scene.width, self.model.scene.height);
-            Self::rect(
-                &mut vertices,
-                w,
-                h,
-                left - 7.0,
-                top_y,
-                right + 7.0,
-                top_y + 3.0,
-                [0.10, 0.12, 0.14, 1.0],
-            );
-            Self::rect(
-                &mut vertices,
-                w,
-                h,
-                left - 7.0,
-                base_y - 3.0,
-                right + 7.0,
-                base_y + 7.0,
-                [0.10, 0.12, 0.14, 1.0],
-            );
-            Self::rect(
-                &mut vertices,
-                w,
-                h,
-                left - 6.0,
-                top_y,
-                left + 1.0,
-                base_y,
-                [0.18, 0.20, 0.22, 1.0],
-            );
-            Self::rect(
-                &mut vertices,
-                w,
-                h,
-                right - 1.0,
-                top_y,
-                right + 6.0,
-                base_y,
-                [0.18, 0.20, 0.22, 1.0],
-            );
+            // Each base deck identifies a physical bay. Internal uprights remain
+            // visible when the entire category is fitted into the viewport.
+            for bay in self
+                .model
+                .scene
+                .shelves
+                .iter()
+                .filter(|shelf| shelf.kind == ShelfKind::BaseDeck)
+            {
+                let bay_left = self.model.world_to_screen(bay.x, Length::ZERO).0;
+                let bay_right = self
+                    .model
+                    .world_to_screen(bay.x + bay.width, Length::ZERO)
+                    .0;
+                Self::rect(
+                    &mut vertices,
+                    w,
+                    h,
+                    bay_left,
+                    top_y,
+                    bay_right,
+                    top_y + 3.0,
+                    [0.10, 0.12, 0.14, 1.0],
+                );
+                for upright in [bay_left, bay_right] {
+                    Self::rect(
+                        &mut vertices,
+                        w,
+                        h,
+                        upright - 2.0,
+                        top_y,
+                        upright + 2.0,
+                        base_y + 4.0,
+                        [0.18, 0.20, 0.22, 1.0],
+                    );
+                }
+            }
             for shelf in &self.model.scene.shelves {
                 let elevation = self
                     .model
@@ -494,7 +535,11 @@ mod webgpu {
                     .filter(|drag| drag.shelf_id == shelf.id)
                     .map(|drag| drag.elevation)
                     .unwrap_or(shelf.elevation);
-                let y = self.model.world_to_screen(Length::ZERO, elevation).1;
+                let (left, y) = self.model.world_to_screen(shelf.x, elevation);
+                let right = self
+                    .model
+                    .world_to_screen(shelf.x + shelf.width, elevation)
+                    .0;
                 let selected = matches!(
                     &self.model.selected,
                     Some(Selection::Shelf { id }) if id == &shelf.id
@@ -519,9 +564,9 @@ mod webgpu {
                     &mut vertices,
                     w,
                     h,
-                    left - 3.0,
+                    left,
                     y - thickness / 2.0,
-                    right + 3.0,
+                    right,
                     y + thickness / 2.0,
                     color,
                 );
@@ -536,9 +581,11 @@ mod webgpu {
                 else {
                     continue;
                 };
-                let (x1, shelf_y) = self.model.world_to_screen(placement.x, shelf.elevation);
+                let (x1, shelf_y) = self
+                    .model
+                    .world_to_screen(shelf.x + placement.x, shelf.elevation);
                 let (x2, product_top) = self.model.world_to_screen(
-                    placement.x + placement.width,
+                    shelf.x + placement.x + placement.width,
                     shelf.elevation + placement.height,
                 );
                 if matches!(
@@ -590,9 +637,10 @@ mod webgpu {
                         }
                     }
                     if let Some(front_lip_height) = placement.tray_front_lip_height {
-                        let (_, lip_top) = self
-                            .model
-                            .world_to_screen(placement.x, shelf.elevation + front_lip_height);
+                        let (_, lip_top) = self.model.world_to_screen(
+                            shelf.x + placement.x,
+                            shelf.elevation + front_lip_height,
+                        );
                         Self::rect(
                             &mut vertices,
                             w,
@@ -630,9 +678,11 @@ mod webgpu {
                     else {
                         continue;
                     };
-                    let (x1, shelf_y) = self.model.world_to_screen(placement.x, shelf.elevation);
+                    let (x1, shelf_y) = self
+                        .model
+                        .world_to_screen(shelf.x + placement.x, shelf.elevation);
                     let (x2, product_top) = self.model.world_to_screen(
-                        placement.x + placement.width,
+                        shelf.x + placement.x + placement.width,
                         shelf.elevation + placement.height,
                     );
                     Self::rect(
@@ -672,9 +722,11 @@ mod webgpu {
                     else {
                         continue;
                     };
-                    let (x1, shelf_y) = self.model.world_to_screen(placement.x, shelf.elevation);
+                    let (x1, shelf_y) = self
+                        .model
+                        .world_to_screen(shelf.x + placement.x, shelf.elevation);
                     let (x2, product_top) = self.model.world_to_screen(
-                        placement.x + placement.width,
+                        shelf.x + placement.x + placement.width,
                         shelf.elevation + placement.height,
                     );
                     Self::dashed_outline(
@@ -689,8 +741,19 @@ mod webgpu {
                     );
                 }
             }
-            if let Some(drag) = &self.model.drag {
-                let y = self.model.world_to_screen(Length::ZERO, drag.elevation).1;
+            if let Some((drag, shelf)) = self.model.drag.as_ref().and_then(|drag| {
+                self.model
+                    .scene
+                    .shelves
+                    .iter()
+                    .find(|shelf| shelf.id == drag.shelf_id)
+                    .map(|shelf| (drag, shelf))
+            }) {
+                let (left, y) = self.model.world_to_screen(shelf.x, drag.elevation);
+                let right = self
+                    .model
+                    .world_to_screen(shelf.x + shelf.width, drag.elevation)
+                    .0;
                 Self::rect(
                     &mut vertices,
                     w,
@@ -791,6 +854,140 @@ impl WebGpuRenderer {
 mod tests {
     use super::*;
     use planogram_core::{CommandResult, DraftVersion, ProductId, VersionId};
+
+    fn multi_bay_scene(bay_count: i32) -> RenderScene {
+        let mut draft = DraftVersion::default();
+        let result = draft.add_placement(
+            &draft.id.clone(),
+            &ProductId::new("jif_creamy_16"),
+            &ShelfId::new("shelf_01"),
+            0,
+            "renderer test setup",
+        );
+        assert!(matches!(result, CommandResult::Applied { .. }));
+        let mut scene = draft.render_scene();
+        let first_bay = scene.shelves.clone();
+        let bay_width = scene.width;
+        for bay in 1..bay_count {
+            scene
+                .shelves
+                .extend(first_bay.iter().cloned().map(|mut shelf| {
+                    shelf.id = ShelfId::new(format!("{}_bay_{bay}", shelf.id.0));
+                    shelf.x = Length::from_sixteenths(bay_width.sixteenths() * bay);
+                    shelf
+                }));
+        }
+        scene.width = Length::from_sixteenths(bay_width.sixteenths() * bay_count);
+        scene
+    }
+
+    #[test]
+    fn same_elevation_shelves_are_picked_in_their_own_bay() {
+        let mut renderer = RenderModel::new(multi_bay_scene(8));
+        renderer.resize(1200.0, 800.0);
+        for bay in 0..8 {
+            let id = if bay == 0 {
+                ShelfId::new("shelf_01")
+            } else {
+                ShelfId::new(format!("shelf_01_bay_{bay}"))
+            };
+            let shelf = renderer
+                .scene
+                .shelves
+                .iter()
+                .find(|shelf| shelf.id == id)
+                .unwrap();
+            // The right side is clear of the setup product in the first bay.
+            let (x, y) = renderer.world_to_screen(
+                shelf.x + Length::from_sixteenths(shelf.width.sixteenths() - 32),
+                shelf.elevation,
+            );
+            assert_eq!(renderer.hit_test(x, y), Some(HitTarget::Shelf { id }));
+        }
+    }
+
+    #[test]
+    fn cross_bay_patch_keeps_local_coordinates_and_updates_world_hit_target() {
+        let mut renderer = RenderModel::new(multi_bay_scene(2));
+        renderer.resize(1200.0, 800.0);
+        let mut moved = renderer.scene.placements[0].clone();
+        let source = renderer
+            .scene
+            .shelves
+            .iter()
+            .find(|shelf| shelf.id == moved.shelf_id)
+            .unwrap()
+            .clone();
+        let destination = renderer
+            .scene
+            .shelves
+            .iter()
+            .find(|shelf| shelf.id == ShelfId::new("shelf_01_bay_1"))
+            .unwrap()
+            .clone();
+        let local_midpoint = Length::from_sixteenths(moved.width.sixteenths() / 2);
+        let product_midpoint_y =
+            source.elevation + Length::from_sixteenths(moved.height.sixteenths() / 2);
+        let (old_x, y) = renderer.world_to_screen(source.x + local_midpoint, product_midpoint_y);
+        renderer.select(Some(Selection::Placement {
+            id: moved.id.clone(),
+        }));
+        moved.shelf_id = destination.id.clone();
+        moved.x = Length::from_sixteenths(2);
+        renderer.apply_patch(&ScenePatch {
+            revision: renderer.scene.revision + 1,
+            shelves: Vec::new(),
+            placements: vec![moved.clone()],
+            removed_placement_ids: Vec::new(),
+            validation: Default::default(),
+        });
+        let (new_x, _) =
+            renderer.world_to_screen(destination.x + moved.x + local_midpoint, product_midpoint_y);
+        assert_eq!(renderer.hit_test(old_x, y), None);
+        assert_eq!(
+            renderer.hit_test(new_x, y),
+            Some(HitTarget::Placement {
+                id: moved.id.clone(),
+                shelf_id: destination.id,
+            })
+        );
+        assert_eq!(renderer.scene.placements, vec![moved.clone()]);
+        assert_eq!(
+            renderer.selected,
+            Some(Selection::Placement { id: moved.id })
+        );
+    }
+
+    #[test]
+    fn bay_focus_centers_the_requested_bay_without_mutating_scene() {
+        let scene = multi_bay_scene(8);
+        let mut renderer = RenderModel::new(scene.clone());
+        renderer.resize(1200.0, 800.0);
+        let fit_all_scale = renderer.fit_scale();
+        assert!(renderer.focus_bay(&ShelfId::new("shelf_01_bay_6")));
+        let shelf = renderer
+            .scene
+            .shelves
+            .iter()
+            .find(|shelf| shelf.id == ShelfId::new("shelf_01_bay_6"))
+            .unwrap();
+        let (left, _) = renderer.world_to_screen(shelf.x, Length::ZERO);
+        let (right, _) = renderer.world_to_screen(shelf.x + shelf.width, Length::ZERO);
+        assert!(((left + right) / 2.0 - 600.0).abs() < 0.01);
+        assert!(left >= 0.0 && right <= 1200.0);
+        assert!(renderer.fit_scale() > fit_all_scale);
+        let bay_center = shelf.x + Length::from_sixteenths(shelf.width.sixteenths() / 2);
+        let focused = renderer.camera;
+        assert!(!renderer.focus_bay(&ShelfId::new("missing")));
+        assert_eq!(renderer.camera, focused);
+        renderer.zoom_by(1.5);
+        assert!((renderer.world_to_screen(bay_center, Length::ZERO).0 - 600.0).abs() < 0.01);
+        renderer.pan_by(50.0, -40.0);
+        assert_eq!(renderer.scene, scene);
+        renderer.fit();
+        assert!((renderer.fit_scale() - fit_all_scale).abs() < f32::EPSILON);
+        assert_eq!(renderer.scene, scene);
+    }
 
     #[test]
     fn camera_changes_do_not_mutate_authoritative_geometry() {
@@ -906,9 +1103,9 @@ mod tests {
             .iter()
             .find(|shelf| shelf.id == placement.shelf_id)
             .unwrap();
-        let (left, shelf_y) = renderer.world_to_screen(placement.x, shelf.elevation);
+        let (left, shelf_y) = renderer.world_to_screen(shelf.x + placement.x, shelf.elevation);
         let (right, top) = renderer.world_to_screen(
-            placement.x + placement.width,
+            shelf.x + placement.x + placement.width,
             shelf.elevation + placement.height,
         );
         let hit = renderer.hit_test((left + right) / 2.0, (top + shelf_y) / 2.0);

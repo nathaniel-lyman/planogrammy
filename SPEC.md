@@ -642,7 +642,9 @@ The renderer must start with a conservative WebGPU feature set and explicit brow
 
 ## 12. Persistence and Collaboration
 
-Persist normalized entities, versions, placements, and change sets in PostgreSQL.
+The currently approved first persistence slice uses portable local bay files. **Save bay** names and downloads a versioned `.planogrammy.json` document; **Open bay** restores its committed catalog snapshot, exact dimensions, facings, IDs, revision, ID counters and complete undo history. Rust validates both structure and history before replacing the current draft, and the UI confirms replacement of unsaved work or pending proposals. Preview-only proposals, selection and camera state are excluded. No authentication, cloud storage or external format import is part of this slice.
+
+The later server persistence phase will persist normalized entities, versions, placements, and change sets in PostgreSQL.
 
 Required guarantees:
 
@@ -816,3 +818,9 @@ The following decisions must be made before their respective implementation phas
 - [`wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/)
 - [`web-sys` Canvas 2D example](https://rustwasm.github.io/docs/wasm-bindgen/examples/2d-canvas.html)
 - [WebGPU overview](https://webgpu.org/)
+
+## Approved bounded implementation: synthetic cereal eight-to-six challenge
+
+A seeded generator creates 100 fictional cereal SKUs with correlated brand/family/pack-size dimensions, tiers and assumed demand. It produces an immutable eight-bay reference and a six-bay editable target, each using four-foot fixture sections and five adjustable cereal levels. Users can duplicate up to six target alternatives and edit through the existing semantic Rust command/undo engine. A camera-only bay focus supports dense category editing.
+
+The comparison reports hard fit, distinct catalog coverage and unplaced items, shelf capacity in units, weighted and per-SKU days of cover, and a clearly labeled sum of SKU capacity turnovers/week. Assumptions and formulas are visible. This is synthetic planning, with no actual retailer data, demand forecast, facings-driven sales uplift, or financial outcome claim. Replenishment is a capacity-turnover proxy; delivery schedules, backroom stock, case rounding, service levels and labor are not modeled. The baseline and every alternative survive local version-2 Save/Open; version-1 standard bay compatibility remains supported.

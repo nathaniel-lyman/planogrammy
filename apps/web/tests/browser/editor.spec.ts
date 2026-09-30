@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { expect, test, type Page } from '@playwright/test';
 
 type SiteTool = { name: string; execute: (args: unknown, context?: { signal?: AbortSignal }) => Promise<unknown> };
@@ -392,4 +393,215 @@ test('keeps loaded tray facings fixed in the inspector and through WebMCP', asyn
     validation: { issues: [{ code: 'tray_facing_mismatch' }] },
   });
   await expectRevision(page, 1);
+});
+
+
+async function downloadBay(page: Page, name: string) {
+  await page.getByRole('button', { name: 'Save bay', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save this arrangement' });
+  await dialog.getByLabel('Bay name').fill(name);
+  const downloadPromise = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: 'Download bay' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe(`${name}.planogrammy.json`);
+  expect(await download.failure()).toBeNull();
+  return await readFile((await download.path())!, 'utf8');
+}
+
+async function openBayText(page: Page, text: string) {
+  await page.getByLabel('Open bay file').setInputFiles({ name: 'test.planogrammy.json', mimeType: 'application/json', buffer: Buffer.from(text) });
+}
+
+test('downloads the complete bay, closes, reopens, edits and undoes preserved history', async ({ page, context }, testInfo) => {
+  await openEditorWithSiteTools(page);
+  await addToShelf01(page, 2);
+  const json = await downloadBay(page, 'Peanut butter bay');
+  const file = JSON.parse(json);
+  expect(file).toMatchObject({ format: 'planogrammy-bay', format_version: 1, name: 'Peanut butter bay', draft: { revision: 2 } });
+  expect(file.draft.products).toHaveLength(22);
+  expect(file.draft.products.filter((product: { tray: unknown }) => product.tray)).toHaveLength(5);
+  expect(file.draft.placements).toHaveLength(2);
+  expect(file.draft.change_sets).toHaveLength(2);
+  expect(file.draft.fixture.width_sixteenths).toBe(768);
+  const before = await shelf01Placements(page);
+  await expect(page.getByText('No unsaved changes', { exact: true })).toBeVisible();
+  await page.close();
+
+  const reopened = await context.newPage();
+  const errors: string[] = [];
+  reopened.on('pageerror', error => errors.push(error.message));
+  await openEditorWithSiteTools(reopened);
+  await openBayText(reopened, json);
+  await expectRevision(reopened, 2);
+  await expect(reopened.locator('.bay-document strong')).toHaveText('Peanut butter bay');
+  expect(await shelf01Placements(reopened)).toEqual(before);
+  await expect(reopened.getByRole('button', { name: 'Open bay', exact: true })).toBeFocused();
+  const repeated = await downloadBay(reopened, 'Peanut butter bay');
+  expect(JSON.parse(repeated)).toEqual(file);
+  await reopened.screenshot({ path: testInfo.outputPath('reopened-bay.png') });
+  await testInfo.attach('Reopened bay with exact placements', { path: testInfo.outputPath('reopened-bay.png'), contentType: 'image/png' });
+  await testInfo.attach('Portable bay file', { body: json, contentType: 'application/json' });
+  await reopened.getByRole('button', { name: /Shelf 01/ }).click();
+  await reopened.getByRole('button', { name: /Add .*selected shelf/ }).click();
+  await expectRevision(reopened, 3);
+  await expect(reopened.getByText('Unsaved changes', { exact: true })).toBeVisible();
+  await reopened.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expectRevision(reopened, 4);
+  expect(await shelf01Placements(reopened)).toEqual(before);
+  await reopened.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expectRevision(reopened, 5);
+  expect(await shelf01Placements(reopened)).toHaveLength(1);
+  const afterUndo = await downloadBay(reopened, 'After undo');
+  await openBayText(reopened, afterUndo);
+  await expectRevision(reopened, 5);
+  await reopened.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expectRevision(reopened, 6);
+  expect(await shelf01Placements(reopened)).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('invalid files and cancelled replacements preserve current work; repeated opens reset selection', async ({ page }) => {
+  await openEditorWithSiteTools(page);
+  const initial = await downloadBay(page, 'Empty bay');
+  await addToShelf01(page);
+  const before = await shelf01Placements(page);
+  for (const invalid of ['{', initial.replace('"format_version": 1', '"format_version": 42'), initial.replace('"next_placement": 1', '"next_placement": 0')]) {
+    await openBayText(page, invalid);
+    await expect(page.locator('.file-feedback[role="alert"]')).toBeVisible();
+    await expectRevision(page, 1);
+    expect(await shelf01Placements(page)).toEqual(before);
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+  }
+  await openBayText(page, initial);
+  const replace = page.getByRole('dialog', { name: 'Replace the current bay?' });
+  await expect(replace).toBeVisible();
+  await expect(replace.getByRole('button', { name: 'Keep current bay' })).toBeFocused();
+  await replace.getByRole('button', { name: 'Keep current bay' }).click();
+  await expectRevision(page, 1);
+  expect(await shelf01Placements(page)).toEqual(before);
+  await openBayText(page, initial);
+  await page.keyboard.press('Escape');
+  await expectRevision(page, 1);
+  await openBayText(page, initial);
+  await replace.getByRole('button', { name: 'Replace bay', exact: true }).click();
+  await expectRevision(page, 0);
+  expect(await shelf01Placements(page)).toEqual([]);
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeDisabled();
+  await expect(page.locator('.shelf-list button[aria-current="true"]')).toHaveCount(0);
+  await openBayText(page, initial);
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expectRevision(page, 0);
+});
+
+test('saving excludes a pending proposal and opening confirms its discard even with no unsaved edits', async ({ page }) => {
+  await openEditorWithSiteTools(page);
+  const preview = await callSiteTool<{ proposal_id: string }>(page, 'planogram.preview_changes', {
+    expected_revision: 0,
+    operations: [{ kind: 'add', product_id: 'jif_creamy_16', shelf_id: 'shelf_01', sequence: 0 }],
+    reason: 'Pending assortment',
+  });
+  await expect(page.getByRole('heading', { name: 'Proposal review' })).toBeVisible();
+  await page.getByRole('button', { name: 'Save bay', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('will not be included');
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+  const json = await downloadBay(page, 'Committed bay');
+  expect(JSON.parse(json).draft.placements).toEqual([]);
+  expect(JSON.parse(json).draft.change_sets).toEqual([]);
+  await expect(page.getByRole('heading', { name: 'Proposal review' })).toBeVisible();
+  await openBayText(page, json);
+  const replace = page.getByRole('dialog', { name: 'Replace the current bay?' });
+  await expect(replace).toContainText('pending proposal');
+  await replace.getByRole('button', { name: 'Keep current bay' }).click();
+  await expect(page.getByRole('heading', { name: 'Proposal review' })).toBeVisible();
+  await openBayText(page, json);
+  await replace.getByRole('button', { name: 'Replace bay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Proposal review' })).not.toBeVisible();
+  expect(await callSiteTool(page, 'planogram.apply_changes', { proposal_id: preview.proposal_id, expected_revision: 0 })).toMatchObject({ status: 'not_found' });
+  await expectRevision(page, 0);
+});
+
+
+test('a concurrent edit while replacement is pending rejects the stale open without losing newer work', async ({ page }) => {
+  await openEditorWithSiteTools(page);
+  const json = await downloadBay(page, 'Baseline');
+  await addToShelf01(page);
+  await openBayText(page, json);
+  await expect(page.getByRole('dialog', { name: 'Replace the current bay?' })).toBeVisible();
+  expect(await callSiteTool(page, 'planogram.add_product', { product_id: 'jif_creamy_16', shelf_id: 'shelf_01', expected_revision: 1 })).toMatchObject({ status: 'applied', revision: 2 });
+  await page.getByRole('button', { name: 'Replace bay', exact: true }).click();
+  await expect(page.locator('.file-feedback[role="alert"]')).toContainText('changed while opening');
+  await expectRevision(page, 2);
+  expect(await shelf01Placements(page)).toHaveLength(2);
+  await expect(page.getByText('Unsaved changes', { exact: true })).toBeVisible();
+  // The browser must offer a way to cancel navigation while work is unsaved.
+  const dialogPromise = page.waitForEvent('dialog');
+  const navigation = page.reload({ timeout: 2_000 }).catch(() => undefined);
+  const dialog = await dialogPromise;
+  expect(dialog.type()).toBe('beforeunload');
+  await dialog.dismiss();
+  await navigation;
+  await expectRevision(page, 2);
+});
+
+test('synthetic eight-to-six challenge edits alternatives and preserves baseline across reopen', async ({page,context},testInfo)=>{
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  await openEditorWithSiteTools(page);
+  await page.getByRole('button',{name:'Cereal challenge',exact:true}).click();
+  await page.getByRole('button',{name:'Start cereal challenge'}).click();
+  const compare=page.getByRole('region',{name:'Cereal challenge comparison'});
+  await expect(compare).toContainText('1,095 units');await expect(compare).toContainText('1,475 units');
+  await expect(page.locator('.catalog-header')).toContainText('100 SKUs');
+  await page.screenshot({path:testInfo.outputPath('six-bay-overview.png')});
+  await page.getByRole('combobox',{name:'Focus bay'}).selectOption('bay_06');
+  await expect(page.locator('.shelf-list>li')).toHaveCount(6);
+  await page.screenshot({path:testInfo.outputPath('six-bay-focused.png')});
+  await page.getByRole('combobox',{name:'Focus bay'}).selectOption('');
+  const original=JSON.parse(await downloadBay(page,'Cereal baseline'));
+  expect(original.format_version).toBe(2);expect(original.document.baseline.fixture.sections).toHaveLength(8);
+  expect(original.document.alternatives[0].draft.fixture.sections).toHaveLength(6);
+  await page.locator('.placement-list .companion-placement>button').first().click();
+  await page.getByRole('button',{name:'Remove product',exact:true}).click();
+  await expectRevision(page,1);await expect(compare).toContainText('99 / 100 SKUs');
+  await expect(compare).toContainText('1 unplaced SKUs');
+  await page.getByRole('button',{name:'Duplicate target'}).click();
+  await expectRevision(page,1);
+  await page.getByRole('combobox',{name:'Scenario alternative'}).selectOption('-1');
+  await expect(page.locator('.baseline-note')).toBeVisible();await expect(compare).toContainText('1,475 units');
+  const saved=await downloadBay(page,'Cereal alternatives');
+  expect(JSON.parse(saved).document.baseline).toEqual(original.document.baseline);
+  const reopened=await context.newPage();await openEditorWithSiteTools(reopened);await openBayText(reopened,saved);
+  await reopened.getByRole('combobox',{name:'Scenario alternative'}).selectOption('0');
+  await expectRevision(reopened,1);await reopened.getByRole('button',{name:'Undo',exact:true}).click();await expectRevision(reopened,2);
+  await expect(reopened.getByRole('region',{name:'Cereal challenge comparison'})).toContainText('1,095 units');
+  await reopened.getByRole('combobox',{name:'Scenario alternative'}).selectOption('1');
+  await expectRevision(reopened,1);await expect(reopened.getByRole('region',{name:'Cereal challenge comparison'})).toContainText('99 / 100 SKUs');
+  const again=await downloadBay(reopened,'Repeated scenario');await openBayText(reopened,again);
+  expect(JSON.parse(await downloadBay(reopened,'Repeated scenario'))).toEqual(JSON.parse(again));
+  await reopened.screenshot({path:testInfo.outputPath('six-bay-reopened.png')});
+  expect(errors).toEqual([]);
+});
+
+test('cereal cross-bay movement is atomic and undoable; baseline and corrupted files are protected', async ({page})=>{
+  await openEditorWithSiteTools(page);
+  await page.getByRole('button',{name:'Cereal challenge',exact:true}).click();await page.getByRole('button',{name:'Start cereal challenge'}).click();
+  const original=JSON.parse(await downloadBay(page,'Cross bay'));
+  const targetShelf='bay_06_shelf_05';
+  const destination=original.document.alternatives[0].draft.placements.filter((p:{shelf_id:string})=>p.shelf_id===targetShelf);
+  const preview=await callSiteTool<{proposal_id:string}>(page,'planogram.preview_changes',{expected_revision:0,reason:'Make a destination gap',operations:destination.map((p:{id:string})=>({kind:'remove',placement_id:p.id}))});
+  expect(await callSiteTool(page,'planogram.apply_changes',{expected_revision:0,proposal_id:preview.proposal_id})).toMatchObject({status:'applied',revision:1});
+  await page.locator('.placement-list .companion-placement>button').first().click();
+  await page.getByLabel('Shelf',{exact:true}).selectOption(targetShelf);
+  await page.getByLabel('Position',{exact:true}).fill('0');
+  await page.locator('.placement-form').getByRole('button',{name:'Apply',exact:true}).click();
+  await expectRevision(page,2);
+  const moved=JSON.parse(await downloadBay(page,'Moved')).document.alternatives[0].draft;
+  expect(moved.placements.find((p:{id:string})=>p.id==='placement_0001')).toMatchObject({shelf_id:targetShelf,x_sixteenths:0});
+  await page.getByRole('button',{name:'Undo',exact:true}).click();await expectRevision(page,3);
+  const undone=JSON.parse(await downloadBay(page,'Undone')).document.alternatives[0].draft;
+  expect(undone.placements.find((p:{id:string})=>p.id==='placement_0001')).toEqual(original.document.alternatives[0].draft.placements[0]);
+  await page.getByRole('combobox',{name:'Scenario alternative'}).selectOption('-1');
+  expect(await callSiteTool(page,'planogram.add_product',{expected_revision:0,product_id:'cereal_01_01_01',shelf_id:'bay_01_shelf_01'})).toMatchObject({status:'forbidden'});
+  original.document.alternatives[0].draft.scenario_origin.bay_count=8;
+  await openBayText(page,JSON.stringify(original));await expect(page.locator('.file-feedback[role="alert"]')).toContainText('Invalid six-bay');
+  await expect(page.getByRole('combobox',{name:'Scenario alternative'})).toHaveValue('-1');
 });

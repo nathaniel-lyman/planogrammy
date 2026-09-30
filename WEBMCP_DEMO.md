@@ -13,7 +13,7 @@ The strongest proof is one continuous loop:
 5. Approve it with the visible **Accept proposal** button.
 6. Inspect the durable approval receipt and validate revision 1.
 
-No record is published or persisted. The demo changes only the in-memory draft in the open tab.
+Site tools change the in-memory draft in the open tab and never publish it. Use **Save bay** to name and download a portable `.planogrammy.json` file, then **Open bay** to continue editing later. The file includes the committed catalog, exact layout and complete undo history. Pending proposals are excluded; accept them first to include them. Opening validates the file before replacing anything and asks before discarding unsaved changes or a pending proposal.
 
 ## Setup
 

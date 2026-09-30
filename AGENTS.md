@@ -30,6 +30,10 @@ The representative catalog contains 22 peanut-butter SKUs. Every product exposes
 
 Five products use a loaded tray configuration: `jif_creamy_16`, `skippy_creamy_16`, `peter_pan_creamy_16`, `smuckers_natural_16`, and `justins_classic_16`. The Rust fields are `outer_width`, `outer_height`, `outer_depth`, `front_lip_height`, `facings_x`, and `units_deep`; transport adapters add `_sixteenths` to the four `Length` values. These outer dimensions describe the loaded footprint. One loaded tray is one placement. Products without a tray configuration remain loose.
 
+## Portable bay files
+
+The first persistence slice is a local version-1 `.planogrammy.json` file, not a backend. It contains a document name and the complete committed `DraftVersion` including its catalog snapshot, exact geometry/facings/IDs, revisions, counters, and compensating change history. Pending proposals and camera/selection state are not committed data and must not be saved. Opening validates the entire snapshot and history through Rust before atomically replacing the engine state; failed or cancelled opens preserve current work. The browser tracks unsaved revisions, warns before replacement/navigation, and makes pending-proposal exclusion explicit. No login, cloud storage, PSA import, or new AI behavior is included.
+
 ## Repository boundaries
 
 ```text
@@ -171,3 +175,11 @@ For catalog or tray changes, specifically prove:
 For manual facing changes, specifically prove widening pushes only overlapping neighbors on the 1/8-inch grid, narrowing leaves neighbors in place, overflow, clearance, depth, and tray-preset violations change nothing, and one undo restores every exact prior position and facing count.
 
 For shelf-facing allocation, specifically prove preview is non-mutating, apply recomputes and validates the semantic intent in Rust, loose facing counts are as even as shelf capacity permits, no additional whole facing fits, residual slack is distributed on the 1/8-inch grid, loaded trays retain their presets, and one undo restores every exact prior configuration.
+
+## Approved synthetic cereal challenge
+
+The next bounded slice explicitly permits a seeded, synthetic-only 100-SKU cereal catalog (five fictional brands × five cereal families × four pack sizes), an immutable eight-bay baseline, and up to six editable six-bay alternatives. Each bay is four feet wide with five adjustable cereal shelves at 8/23/38/53/68 inches and an empty fixed base deck. Fixture sections own horizontal bay origins; placement x remains shelf-local. Elevation collisions and clearance are scoped to a section. Existing Rust commands, validation, revisions and compensating undo remain authoritative.
+
+Generator version 1 is immutable genesis data for history replay. Scenario files use format version 2 and include seed, assumptions, baseline, alternatives, active view, catalog snapshots and complete histories. Standard single-bay files remain version 1 and readable. Document revision guards replacement across alternative switches even when domain revision numbers happen to match.
+
+Comparison uses Rust-derived stocked units and SKU-deduplicated demand. Capacity, distinct assortment, missing SKU IDs, weighted days cover, per-SKU cover and the sum of per-SKU demand/capacity ratios are simulated planning quantities. The latter is a sum of fractional SKU capacity turnovers per week, not category inventory turns, trips, cases, labor or financial forecasts. Always expose missing assortment beside this proxy. More facings never increase assumed demand. No real data integration or financial-outcome comparison is in scope.

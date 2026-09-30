@@ -1,3 +1,6 @@
+mod bay_file;
+mod document;
+use document::EditorDocument;
 use planogram_core::{
     ChangeSetId, CommandResult, DraftVersion, FacingsRequest, Length, PlacementChange, PlacementId,
     ProductId, ShelfAllocationStrategy, ShelfDistribution, ShelfId, VersionId,
@@ -94,7 +97,8 @@ fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub struct PlanogramEngine {
-    draft: DraftVersion,
+    document: EditorDocument,
+    document_revision: u32,
     renderer: Option<WebGpuRenderer>,
 }
 
@@ -103,22 +107,110 @@ impl PlanogramEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            draft: DraftVersion::default(),
+            document: EditorDocument::Bay {
+                draft: DraftVersion::default(),
+            },
+            document_revision: 0,
             renderer: None,
         }
     }
 
     pub async fn initialize_renderer(&mut self, canvas_id: String) -> Result<(), JsValue> {
-        let renderer = WebGpuRenderer::new(&canvas_id, self.draft.render_scene())
+        let renderer = WebGpuRenderer::new(&canvas_id, self.document.draft().render_scene())
             .await
             .map_err(|message| JsValue::from_str(&message))?;
         self.renderer = Some(renderer);
         Ok(())
     }
 
+    pub fn export_bay(&self, name: String) -> Result<String, JsValue> {
+        bay_file::export_document(&self.document, &name).map_err(|error| JsValue::from_str(&error))
+    }
+
+    pub fn inspect_bay(&self, json: String) -> Result<String, JsValue> {
+        bay_file::parse_document(&json)
+            .map(|(name, _)| name)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    pub fn restore_bay(&mut self, json: String, expected_revision: u32) -> Result<String, JsValue> {
+        if self.document_revision != expected_revision {
+            return Err(JsValue::from_str(
+                "The bay changed while opening the file. Try Open again.",
+            ));
+        }
+        let (name, document) =
+            bay_file::parse_document(&json).map_err(|error| JsValue::from_str(&error))?;
+        let scene = document.draft().render_scene();
+        self.document = document;
+        self.document_revision += 1;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.model.replace_scene(scene);
+            let _ = renderer.render();
+        }
+        Ok(name)
+    }
+
+    pub fn start_cereal(
+        &mut self,
+        seed: u32,
+        expected_document_revision: u32,
+    ) -> Result<(), JsValue> {
+        self.check_document_revision(expected_document_revision)?;
+        self.document = EditorDocument::cereal(seed).map_err(|e| JsValue::from_str(&e))?;
+        self.document_changed();
+        Ok(())
+    }
+    pub fn select_alternative(
+        &mut self,
+        index: i32,
+        expected_document_revision: u32,
+    ) -> Result<(), JsValue> {
+        self.check_document_revision(expected_document_revision)?;
+        self.document
+            .select(index)
+            .map_err(|e| JsValue::from_str(&e))?;
+        self.document_changed();
+        Ok(())
+    }
+    pub fn duplicate_alternative(
+        &mut self,
+        expected_document_revision: u32,
+    ) -> Result<(), JsValue> {
+        self.check_document_revision(expected_document_revision)?;
+        self.document
+            .duplicate()
+            .map_err(|e| JsValue::from_str(&e))?;
+        self.document_changed();
+        Ok(())
+    }
+    fn check_document_revision(&self, expected: u32) -> Result<(), JsValue> {
+        if expected != self.document_revision {
+            Err(JsValue::from_str("The document changed. Try again."))
+        } else {
+            Ok(())
+        }
+    }
+    fn document_changed(&mut self) {
+        self.document_revision += 1;
+        let scene = self.document.draft().render_scene();
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.model.replace_scene(scene);
+            let _ = renderer.render();
+        }
+    }
+    pub fn focus_bay(&mut self, shelf_id: String) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.model.focus_bay(&ShelfId::new(shelf_id));
+            let _ = renderer.render();
+        }
+    }
+
     pub fn context(&self) -> Result<JsValue, JsValue> {
         #[derive(Serialize)]
         struct Context<'a> {
+            document_revision: u32,
+            scenario: Option<document::ScenarioView>,
             version_id: &'a str,
             version_status: planogram_core::VersionStatus,
             revision: u64,
@@ -129,22 +221,29 @@ impl PlanogramEngine {
             latest_undoable_change_set_id: Option<&'a str>,
         }
         to_js(&Context {
-            version_id: &self.draft.id.0,
-            version_status: self.draft.status,
-            revision: self.draft.revision,
-            fixture: &self.draft.fixture,
-            products: &self.draft.products,
-            placements: self.draft.placement_views(),
-            latest_change_set_id: self.draft.latest_change_set_id().map(|id| id.0.as_str()),
+            document_revision: self.document_revision,
+            scenario: self.document.view(),
+            version_id: &self.document.draft().id.0,
+            version_status: self.document.draft().status,
+            revision: self.document.draft().revision,
+            fixture: &self.document.draft().fixture,
+            products: &self.document.draft().products,
+            placements: self.document.draft().placement_views(),
+            latest_change_set_id: self
+                .document
+                .draft()
+                .latest_change_set_id()
+                .map(|id| id.0.as_str()),
             latest_undoable_change_set_id: self
-                .draft
+                .document
+                .draft()
                 .latest_undoable_change_set_id()
                 .map(|id| id.0.as_str()),
         })
     }
 
     pub fn validate_planogram(&self) -> Result<JsValue, JsValue> {
-        to_js(&self.draft.validate_planogram())
+        to_js(&self.document.draft().validate_planogram())
     }
 
     pub fn add_placement(
@@ -155,7 +254,7 @@ impl PlanogramEngine {
         expected_revision: u32,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.add_placement(
+        let result = self.document.draft_mut().add_placement(
             &VersionId::new(version_id),
             &ProductId::new(product_id),
             &ShelfId::new(shelf_id),
@@ -175,7 +274,7 @@ impl PlanogramEngine {
         actor: String,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.add_placement_as(
+        let result = self.document.draft_mut().add_placement_as(
             &VersionId::new(version_id),
             &ProductId::new(product_id),
             &ShelfId::new(shelf_id),
@@ -194,7 +293,7 @@ impl PlanogramEngine {
         expected_revision: u32,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.remove_placement(
+        let result = self.document.draft_mut().remove_placement(
             &VersionId::new(version_id),
             &PlacementId::new(placement_id),
             u64::from(expected_revision),
@@ -212,7 +311,7 @@ impl PlanogramEngine {
         expected_revision: u32,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.move_shelf(
+        let result = self.document.draft_mut().move_shelf(
             &VersionId::new(version_id),
             &ShelfId::new(shelf_id),
             Length::from_sixteenths(elevation_sixteenths),
@@ -232,7 +331,7 @@ impl PlanogramEngine {
         expected_revision: u32,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.move_placement(
+        let result = self.document.draft_mut().move_placement(
             &VersionId::new(version_id),
             &PlacementId::new(placement_id),
             &ShelfId::new(target_shelf_id),
@@ -255,7 +354,7 @@ impl PlanogramEngine {
         expected_revision: u32,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.set_facings(
+        let result = self.document.draft_mut().set_facings(
             &VersionId::new(version_id),
             &PlacementId::new(placement_id),
             FacingsRequest {
@@ -282,7 +381,7 @@ impl PlanogramEngine {
         actor: String,
         reason: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.set_facings_as(
+        let result = self.document.draft_mut().set_facings_as(
             &VersionId::new(version_id),
             &PlacementId::new(placement_id),
             FacingsRequest {
@@ -307,7 +406,7 @@ impl PlanogramEngine {
         reason: String,
     ) -> Result<JsValue, JsValue> {
         let result = match parse_shelf_distribution(&distribution) {
-            Some(distribution) => self.draft.distribute_shelf(
+            Some(distribution) => self.document.draft_mut().distribute_shelf(
                 &VersionId::new(version_id),
                 &ShelfId::new(shelf_id),
                 distribution,
@@ -332,7 +431,7 @@ impl PlanogramEngine {
         reason: String,
     ) -> Result<JsValue, JsValue> {
         let result = match parse_shelf_distribution(&distribution) {
-            Some(distribution) => self.draft.distribute_shelf_as(
+            Some(distribution) => self.document.draft_mut().distribute_shelf_as(
                 &VersionId::new(version_id),
                 &ShelfId::new(shelf_id),
                 distribution,
@@ -355,7 +454,7 @@ impl PlanogramEngine {
         changes: JsValue,
     ) -> Result<JsValue, JsValue> {
         let changes = parse_placement_changes(changes)?;
-        let result = self.draft.preview_placement_changes(
+        let result = self.document.draft().preview_placement_changes(
             &VersionId::new(version_id),
             &changes,
             u64::from(expected_revision),
@@ -384,7 +483,7 @@ impl PlanogramEngine {
         expected_revision: u32,
     ) -> Result<JsValue, JsValue> {
         let result = match parse_shelf_allocation_strategy(&strategy) {
-            Some(strategy) => self.draft.preview_shelf_allocation(
+            Some(strategy) => self.document.draft().preview_shelf_allocation(
                 &VersionId::new(version_id),
                 &ShelfId::new(shelf_id),
                 strategy,
@@ -426,7 +525,7 @@ impl PlanogramEngine {
         reason: String,
     ) -> Result<JsValue, JsValue> {
         let changes = parse_placement_changes(changes)?;
-        let result = self.draft.apply_placement_changes_as(
+        let result = self.document.draft_mut().apply_placement_changes_as(
             &VersionId::new(version_id),
             &changes,
             u64::from(expected_revision),
@@ -447,7 +546,7 @@ impl PlanogramEngine {
         reason: String,
     ) -> Result<JsValue, JsValue> {
         let result = match parse_shelf_allocation_strategy(&strategy) {
-            Some(strategy) => self.draft.apply_shelf_allocation_as(
+            Some(strategy) => self.document.draft_mut().apply_shelf_allocation_as(
                 &VersionId::new(version_id),
                 &ShelfId::new(shelf_id),
                 strategy,
@@ -469,7 +568,7 @@ impl PlanogramEngine {
         change_set_id: String,
         expected_revision: u32,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.undo_change_set(
+        let result = self.document.draft_mut().undo_change_set(
             &VersionId::new(version_id),
             &ChangeSetId::new(change_set_id),
             u64::from(expected_revision),
@@ -485,7 +584,7 @@ impl PlanogramEngine {
         expected_revision: u32,
         actor: String,
     ) -> Result<JsValue, JsValue> {
-        let result = self.draft.undo_change_set_as(
+        let result = self.document.draft_mut().undo_change_set_as(
             &VersionId::new(version_id),
             &ChangeSetId::new(change_set_id),
             u64::from(expected_revision),
@@ -496,6 +595,9 @@ impl PlanogramEngine {
     }
 
     fn apply_result_to_renderer(&mut self, result: &CommandResult) {
+        if matches!(result, CommandResult::Applied { .. }) {
+            self.document_revision += 1;
+        }
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };

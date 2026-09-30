@@ -1,3 +1,6 @@
+mod scenario;
+mod snapshot;
+pub use scenario::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -495,6 +498,7 @@ pub struct PlanogramValidationResult {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ShelfSceneNode {
+    pub x: Length,
     pub id: ShelfId,
     pub kind: ShelfKind,
     pub width: Length,
@@ -626,6 +630,8 @@ enum RequestedPlacementOperation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DraftVersion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_origin: Option<ScenarioOrigin>,
     pub id: VersionId,
     pub status: VersionStatus,
     pub revision: u64,
@@ -640,6 +646,7 @@ pub struct DraftVersion {
 impl Default for DraftVersion {
     fn default() -> Self {
         Self {
+            scenario_origin: None,
             id: VersionId::new("version_draft_01"),
             status: VersionStatus::Draft,
             revision: 0,
@@ -1045,7 +1052,7 @@ impl DraftVersion {
     /// revision, history, selection, or renderer state.
     pub fn validate_planogram(&self) -> PlanogramValidationResult {
         let mut validation = ValidationSummary::default();
-        let mut adjustable_elevations: Vec<Length> = Vec::new();
+        let mut adjustable_elevations: Vec<(SectionId, Length)> = Vec::new();
         let mut product_ids = Vec::new();
         let mut upcs = Vec::new();
 
@@ -1111,7 +1118,8 @@ impl DraftVersion {
                             message: "Shelf elevation must use 1-inch increments.".into(),
                         });
                     }
-                    if adjustable_elevations.contains(&shelf.elevation) {
+                    if adjustable_elevations.contains(&(shelf.section_id.clone(), shelf.elevation))
+                    {
                         validation.issues.push(ValidationIssue {
                             code: ValidationCode::DuplicateElevation,
                             shelf_id: Some(shelf.id.clone()),
@@ -1119,7 +1127,7 @@ impl DraftVersion {
                                 .into(),
                         });
                     }
-                    adjustable_elevations.push(shelf.elevation);
+                    adjustable_elevations.push((shelf.section_id.clone(), shelf.elevation));
                 }
             }
         }
@@ -1167,12 +1175,24 @@ impl DraftVersion {
     }
 
     pub fn render_scene(&self) -> RenderScene {
+        let mut sections: Vec<_> = self.fixture.sections.iter().collect();
+        sections.sort_by_key(|section| (section.sequence, &section.id));
+        let mut offset = Length::ZERO;
+        let offsets: std::collections::HashMap<_, _> = sections
+            .iter()
+            .map(|section| {
+                let x = offset;
+                offset = offset + section.width;
+                (section.id.clone(), x)
+            })
+            .collect();
         let mut shelves: Vec<_> = self
             .fixture
             .sections
             .iter()
             .flat_map(|section| &section.shelves)
             .map(|shelf| ShelfSceneNode {
+                x: offsets[&shelf.section_id],
                 id: shelf.id.clone(),
                 kind: shelf.kind,
                 width: shelf.width,
@@ -1278,6 +1298,7 @@ impl DraftVersion {
             .any(|other| {
                 other.kind == ShelfKind::Adjustable
                     && other.id != *shelf_id
+                    && other.section_id == shelf.section_id
                     && other.elevation == elevation
             })
         {
@@ -1308,6 +1329,7 @@ impl DraftVersion {
                 .sections
                 .iter()
                 .flat_map(|section| &section.shelves)
+                .filter(|candidate| candidate.section_id == placement_shelf.section_id)
                 .map(|candidate| {
                     if candidate.id == *shelf_id {
                         elevation
@@ -3052,15 +3074,7 @@ impl DraftVersion {
                 message: format!("{} requires more shelf depth.", product.description),
             });
         }
-        let clearance = self
-            .fixture
-            .sections
-            .iter()
-            .flat_map(|section| &section.shelves)
-            .filter(|candidate| candidate.elevation > shelf.elevation)
-            .map(|candidate| candidate.elevation - shelf.elevation)
-            .min()
-            .unwrap_or(self.fixture.height - shelf.elevation);
+        let clearance = self.shelf_clearance(&shelf);
         if placement_view.geometry.display_height > clearance {
             validation.issues.push(ValidationIssue {
                 code: ValidationCode::ProductTooTall,

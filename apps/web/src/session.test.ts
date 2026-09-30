@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PlanogramSession, type ProposalApprovalSource, type SessionObservers } from './session';
-import { VERSION_ID, adjustableShelf, appliedResult, makeContext, readyPreview, reflowOperation, revisionConflict, trayPlacement } from './testFixtures';
+import { BAY_FILE_TEXT, VERSION_ID, adjustableShelf, appliedResult, makeContext, readyPreview, reflowOperation, revisionConflict, trayPlacement } from './testFixtures';
 import type { CommandResult, EngineContext, PreviewResult, WasmEngine } from './types';
 
 const operation = { kind: 'add' as const, product_id: 'jif_creamy_16', shelf_id: 'shelf_01', sequence: 0 };
@@ -15,6 +15,12 @@ function makeHarness(startingContext: EngineContext = makeContext()) {
   };
   const mocks = {
     context: vi.fn(() => context),
+    start_cereal: vi.fn(),
+    select_alternative: vi.fn(),
+    duplicate_alternative: vi.fn(),
+    export_bay: vi.fn(() => BAY_FILE_TEXT),
+    inspect_bay: vi.fn(() => 'Peanut butter bay'),
+    restore_bay: vi.fn(() => { context = makeContext(); return 'Peanut butter bay'; }),
     preview_changes: vi.fn((): PreviewResult => readyPreview(context.revision)),
     preview_shelf_allocation: vi.fn((): PreviewResult => readyPreview(context.revision, [reflowOperation(trayPlacement({ facings_x: 1, facings_z: 1 }), { x: 4, facings_x: 4 })])),
     clear_proposal_preview: vi.fn(),
@@ -151,4 +157,44 @@ describe('PlanogramSession proposal lifecycle', () => {
       },
     }));
   });
+});
+
+
+describe('PlanogramSession bay files', () => {
+  it('exports only the engine snapshot while preserving a pending proposal', () => {
+    const harness = makeHarness();
+    preview(harness.session, 'Pending idea');
+    expect(harness.session.exportBay('Peanut butter bay')).toBe(BAY_FILE_TEXT);
+    expect(harness.export_bay).toHaveBeenCalledWith('Peanut butter bay');
+    expect(harness.session.hasPendingProposal()).toBe(true);
+    expect(harness.apply_changes_as).not.toHaveBeenCalled();
+    expect(harness.clear_proposal_preview).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the mirror and discards proposal state only after a successful restore', () => {
+    const harness = makeHarness(makeContext({ revision: 4 }));
+    preview(harness.session, 'Pending idea');
+    expect(harness.session.inspectBay(BAY_FILE_TEXT)).toBe('Peanut butter bay');
+    expect(harness.session.hasPendingProposal()).toBe(true);
+    harness.restore_bay.mockImplementationOnce(() => { throw new Error('Unsupported bay file'); });
+    expect(() => harness.session.restoreBay(BAY_FILE_TEXT, 4)).toThrow('Unsupported');
+    expect(harness.session.hasPendingProposal()).toBe(true);
+    expect(harness.clear_proposal_preview).not.toHaveBeenCalled();
+    expect(harness.session.context().revision).toBe(4);
+    expect(harness.session.restoreBay(BAY_FILE_TEXT, 4)).toBe('Peanut butter bay');
+    expect(harness.restore_bay).toHaveBeenLastCalledWith(BAY_FILE_TEXT, 4);
+    expect(harness.session.hasPendingProposal()).toBe(false);
+    expect(harness.observers.onContext).toHaveBeenLastCalledWith(makeContext());
+    expect(harness.observers.onProposal).toHaveBeenLastCalledWith(undefined);
+    expect(apply(harness.session, 'proposal_0001')).toMatchObject({ status: 'not_found' });
+  });
+});
+
+it('routes scenario operations with document revision and clears proposals only after success',()=>{
+ const h=makeHarness();h.context.mockReturnValue({...makeContext(),document_revision:42});
+ preview(h.session,'Pending');h.select_alternative.mockImplementationOnce(()=>{throw new Error('stale');});
+ expect(()=>h.session.selectAlternative(1)).toThrow('stale');expect(h.session.hasPendingProposal()).toBe(true);
+ h.session.selectAlternative(1);expect(h.select_alternative).toHaveBeenLastCalledWith(1,42);expect(h.session.hasPendingProposal()).toBe(false);
+ h.session.duplicateAlternative();expect(h.duplicate_alternative).toHaveBeenCalledWith(42);
+ h.session.startCereal(123,42);expect(h.start_cereal).toHaveBeenCalledWith(123,42);
 });

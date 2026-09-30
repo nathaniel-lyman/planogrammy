@@ -1,3 +1,5 @@
+import { ScenarioPanel } from './ScenarioPanel';
+import { BayFiles } from './BayFiles';
 import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
 import { CheckCircle2, Focus, Minus, Package, PackagePlus, Plus, RotateCcw, Search, Sparkles, Trash2, Undo2, X, XCircle } from 'lucide-react';
 import { resultError, type FacingsSource, type MoveSource, type PlacementSource, type RemovalSource } from './commands';
@@ -65,7 +67,7 @@ function proposalProductName(productId: unknown, products: Product[], fallback =
 }
 
 function shelfLabel(shelfId: unknown) {
-  return typeof shelfId === 'string' ? shelfId.replace('shelf_', 'Shelf ').replace('_', ' ') : 'shelf';
+  return typeof shelfId === 'string' ? shelfId.replace(/^bay_(\d+)_/, 'Bay $1 · ').replace('shelf_', 'Shelf ').replace('base_deck','Base deck') : 'shelf';
 }
 
 function proposalOperationLabel(operation: unknown, products: Product[], placements: Placement[]) {
@@ -226,6 +228,7 @@ export function App() {
   const setContext = useUiStore(state => state.setContext);
   const selectStore = useUiStore(state => state.select);
   const setCommand = useUiStore(state => state.setCommand);
+  const [fileStatus, setFileStatus] = useState({ message: '', error: '' });
   const [unsupported, setUnsupported] = useState<string>();
   const [elevationInput, setElevationInput] = useState('');
   const [placementShelfInput, setPlacementShelfInput] = useState('');
@@ -244,6 +247,8 @@ export function App() {
   const [revisionRequested, setRevisionRequested] = useState(false);
   const appliedProposalHeadingRef = useRef<HTMLHeadingElement>(null);
 
+  const [activeBay,setActiveBay]=useState('');
+  const resetView = () => {setProductQuery('');setBrandFilter('All brands');setStockingFilter('all');setSelectedProductId(undefined);setActiveBay('');selectStore(undefined);setAppliedProposal(undefined);setRevisionRequested(false);setCommand('idle');setZoomLabel(100);interactionRef.current=undefined;};
   const shelves = useMemo(() => context ? allShelves(context) : [], [context]);
   const products = context?.products ?? [];
   const selectedShelf = selection?.kind === 'shelf' ? shelves.find(shelf => shelf.id === selection.id) : undefined;
@@ -254,14 +259,14 @@ export function App() {
     : 0;
   const targetShelfId = selectedShelf?.id ?? selectedPlacement?.shelf_id;
   const targetShelf = shelves.find(shelf => shelf.id === targetShelfId);
-  const canAddToTargetShelf = targetShelf?.kind === 'adjustable';
+  const canAddToTargetShelf = targetShelf?.kind === 'adjustable' && context?.version_status === 'draft';
   const brands = useMemo(() => Array.from(new Set(products.map(product => product.brand))), [products]);
-  const filteredProducts = useMemo(() => searchProducts(products, {
+  const filteredProducts = useMemo(() => [products.slice(0,50), products.slice(50)].flatMap(batch => searchProducts(batch, {
     query: productQuery,
     brand: brandFilter === 'All brands' ? undefined : brandFilter,
     stocking_mode: stockingFilter === 'all' ? undefined : stockingFilter,
     limit: 50,
-  }), [brandFilter, productQuery, products, stockingFilter]);
+  })), [brandFilter, productQuery, products, stockingFilter]);
   const selectedProduct = filteredProducts.find(product => product.id === selectedProductId) ?? filteredProducts[0];
 
   const handleCommand = useCallback((result: CommandResult) => {
@@ -577,9 +582,10 @@ export function App() {
   if (unsupported) return <main className="unsupported"><div><h1>WebGPU is required</h1><p>Planogrammy could not initialize its Rust WebGPU renderer.</p><code>{unsupported}</code></div></main>;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${context?.scenario ? 'has-scenario' : ''}`}>
       <header className="topbar">
-        <div className="brand"><span className="brand-mark" aria-hidden="true">P</span><strong>Planogrammy</strong><span className="document-title">4' Standard Bay</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true">P</span><strong>Planogrammy</strong></div>
+        <BayFiles onStatus={setFileStatus} sessionRef={sessionRef} revision={context?.document_revision??context?.revision} hasProposal={!!proposal} onOpened={resetView}/>
         <nav aria-label="Editor controls" className="toolbar">
           <button onClick={undo} disabled={!context?.latest_undoable_change_set_id} title="Undo last active change"><Undo2 size={17}/>Undo</button>
           <button onClick={fitFixture}><Focus size={17}/>Fit fixture</button>
@@ -590,6 +596,7 @@ export function App() {
         </nav>
       </header>
 
+      {context?.scenario && <ScenarioPanel scenario={context.scenario} sessionRef={sessionRef} onChanged={resetView}/>}
       <section className="workspace">
         <aside className="catalog" aria-label="Product catalog">
           <div className="catalog-header"><div><span className="section-label">Assortment</span><h1>Product library</h1></div><span>{filteredProducts.length} SKUs</span></div>
@@ -598,7 +605,7 @@ export function App() {
             <label><span className="sr-only">Filter by brand</span><select value={brandFilter} onChange={event => setBrandFilter(event.target.value)}><option>All brands</option>{brands.map(brand => <option key={brand}>{brand}</option>)}</select></label>
             <label><span className="sr-only">Filter by stocking mode</span><select value={stockingFilter} onChange={event => setStockingFilter(event.target.value as 'all' | StockingMode)}><option value="all">All stocking</option><option value="loose">Loose</option><option value="tray">Tray stocked</option></select></label>
           </div>
-          <p className="catalog-data-note">Trailing 13-week illustrative performance · synthetic, not retailer actuals</p>
+          <p className="catalog-data-note">{context?.scenario?'Seeded fictional assortment · assumed demand, not forecasts':'Trailing 13-week illustrative performance · synthetic, not retailer actuals'}</p>
           <div className="product-list">
             {filteredProducts.map(product => <button
               key={product.id}
@@ -627,7 +634,7 @@ export function App() {
           <div className="catalog-action"><button onClick={() => selectedProduct && issuePlacement(selectedProduct.id, targetShelfId, 'catalog_button')} disabled={!selectedProduct || !canAddToTargetShelf}><PackagePlus size={16}/><span>{selectedProduct?.tray ? 'Add tray to selected shelf' : 'Add to selected shelf'}<small>{selectedProduct ? selectedProduct.tray ? `${SHELF_READY_TRAY_LABEL} · ${selectedProduct.tray.facings_x} facings × ${selectedProduct.tray.units_deep} deep` : `${selectedProduct.brand} ${selectedProduct.size_oz} · loose` : 'Choose a product'}</small></span></button><p>Double-click or drag a product onto a shelf. Tray presets resolve in Rust.</p></div>
         </aside>
         <div className="canvas-region">
-          <div className="canvas-heading"><div><span>Front elevation</span><strong>Section 01</strong></div><div className="dimensions">4' W × 7' H × 22" D</div></div>
+          <div className="canvas-heading"><div><span>Front elevation</span><strong>{context?.scenario?'Cereal category':'Section 01'}</strong></div>{context?.scenario && <select aria-label="Focus bay" value={activeBay} onChange={e=>{const id=e.target.value;setActiveBay(id);if(id){const shelf=context.fixture.sections.find(s=>s.id===id)?.shelves[0];if(shelf)sessionRef.current?.engine.focus_bay(shelf.id);}else fitFixture();}}><option value="">All bays</option>{context.fixture.sections.map((section,i)=><option key={section.id} value={section.id}>Bay {String(i+1).padStart(2,'0')}</option>)}</select>}<div className="dimensions">{context && `${formatImperial(context.fixture.width)} W × ${formatImperial(context.fixture.height)} H`}</div></div>
           <canvas
             ref={canvasRef}
             id={CANVAS_ID}
@@ -649,10 +656,10 @@ export function App() {
 
         {proposal ? <ProposalReview proposal={proposal} products={products} placements={context?.placements ?? []} revisionRequested={revisionRequested} onAccept={acceptProposal} onRevise={() => setRevisionRequested(true)} onReject={rejectProposal}/> : <aside className="inspector" aria-label="Selection inspector">
           {appliedProposal && <AppliedProposalReceipt changeSet={appliedProposal.changeSet} headingRef={appliedProposalHeadingRef}/>}
-          <section className="inspector-section selection-panel">
+          <fieldset disabled={context?.version_status === 'published'} className="inspector-section selection-panel">{context?.version_status==='published' && <p className="baseline-note">Locked eight-bay baseline. Switch to a six-bay alternative to edit.</p>}
             <span className="section-label">Selection</span>
             {selectedShelf ? <>
-              <h1>{selectedShelf.kind === 'base_deck' ? 'Base deck' : selectedShelf.id.replace('_', ' ').replace(/\b\w/g, char => char.toUpperCase())}</h1>
+              <h1>{selectedShelf.kind === 'base_deck' ? 'Base deck' : shelfLabel(selectedShelf.id)}</h1>
               <dl><div><dt>ID</dt><dd>{selectedShelf.id}</dd></div><div><dt>Kind</dt><dd>{selectedShelf.kind === 'base_deck' ? 'Base deck' : 'Adjustable'}</dd></div><div><dt>Depth</dt><dd>{formatImperial(selectedShelf.depth)}</dd></div><div><dt>Elevation</dt><dd>{formatImperial(selectedShelf.elevation)}</dd></div></dl>
               <form onSubmit={submitElevation} className="elevation-form">
                 <label htmlFor="elevation">Elevation</label>
@@ -717,7 +724,7 @@ export function App() {
               <form onSubmit={submitPlacementMove} className="placement-form">
                 <label htmlFor="placement-shelf">Shelf</label>
                 <select id="placement-shelf" value={placementShelfInput} onChange={event => setPlacementShelfInput(event.target.value)} aria-describedby="placement-help placement-error">
-                  {shelves.map(shelf => <option key={shelf.id} value={shelf.id} disabled={shelf.kind === 'base_deck'}>{shelf.kind === 'base_deck' ? 'Base deck (fixed)' : shelf.id.replace('shelf_', 'Shelf ')}</option>)}
+                  {shelves.map(shelf => <option key={shelf.id} value={shelf.id} disabled={shelf.kind === 'base_deck'}>{shelf.kind === 'base_deck' ? 'Base deck (fixed)' : shelfLabel(shelf.id)}</option>)}
                 </select>
                 <label htmlFor="placement-x">Position</label>
                 <div className="field-row"><input id="placement-x" value={placementXInput} onChange={event => setPlacementXInput(event.target.value)} aria-describedby="placement-help placement-error"/><button>Apply</button></div>
@@ -742,19 +749,19 @@ export function App() {
               <button className="destructive-action" onClick={() => issueRemoval(selectedPlacement.id, 'inspector')}><Trash2 size={16}/>Remove product</button>
               <small className="keyboard-hint">Delete or Backspace also removes this placement.</small>
             </> : <div className="empty-selection"><RotateCcw size={21}/><p>Select a shelf or product on the canvas or in the fixture outline.</p></div>}
-          </section>
+          </fieldset>
 
           <section className="inspector-section companion" aria-labelledby="companion-heading">
             <div className="companion-heading"><div><span className="section-label">Accessible companion</span><h2 id="companion-heading">Fixture outline</h2></div><span>{shelves.length} levels</span></div>
             <p className="sr-only">Fixture width {context && formatImperial(context.fixture.width)} and height {context && formatImperial(context.fixture.height)}. Current revision {context?.revision ?? 0}. Placement entries identify loose or tray stocking, resolved facings, stocked units, and loaded footprint. Keyboard commands: arrow keys move a selected adjustable shelf one inch or move a selected placement left and right in 1/8-inch increments. Placement shelf and position can be changed together in the inspector. Plus and minus keys add or remove one horizontal facing of a selected loose placement, and the inspector sets wide, high, and deep facings; a wider placement pushes following products right, and loaded trays keep their preset facings. Selected shelves can pack, center, space between, or space products evenly while keeping a 1/8-inch minimum gap. Delete or Backspace removes a selected product placement. The base deck is fixed.</p>
             <ol className="shelf-list">
-              {shelves.map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelf.kind === 'base_deck' ? 'Base deck' : shelf.id.replace('shelf_', 'Shelf ')}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = `${product?.brand ?? 'Product'} ${product?.description ?? placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
+              {shelves.filter(shelf=>!activeBay||shelf.section_id===activeBay).map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelfLabel(shelf.id)}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = `${product?.brand ?? 'Product'} ${product?.description ?? placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
             </ol>
           </section>
         </aside>}
       </section>
 
-      <footer className="statusbar"><span>Revision {context?.revision ?? 0} · All changes local</span><span className={`site-tools-status ${webmcpStatus}`} aria-live="polite">{webmcpStatus === 'ready' ? 'Site tools ready' : webmcpStatus === 'unsupported' ? 'Site tools unavailable' : webmcpStatus === 'error' ? 'Site tools error' : 'Site tools loading'}</span>{proposal && <span className="proposal-status" aria-live="polite" title={proposal.reason}>Proposal ready · {proposal.operationCount} changes</span>}<span className={`command-status ${commandStatus}`}>{commandStatus === 'rejected' ? 'Change rejected' : commandStatus === 'applied' ? 'Change recorded' : 'Ready'}</span></footer>
+      <footer className="statusbar"><span>Revision {context?.revision ?? 0} · All changes local</span><span className="file-feedback" role={fileStatus.error ? 'alert' : 'status'} title={fileStatus.error || fileStatus.message}>{fileStatus.error || fileStatus.message}</span><span className={`site-tools-status ${webmcpStatus}`} aria-live="polite">{webmcpStatus === 'ready' ? 'Site tools ready' : webmcpStatus === 'unsupported' ? 'Site tools unavailable' : webmcpStatus === 'error' ? 'Site tools error' : 'Site tools loading'}</span>{proposal && <span className="proposal-status" aria-live="polite" title={proposal.reason}>Proposal ready · {proposal.operationCount} changes</span>}<span className={`command-status ${commandStatus}`}>{commandStatus === 'rejected' ? 'Change rejected' : commandStatus === 'applied' ? 'Change recorded' : 'Ready'}</span></footer>
     </main>
   );
 }

@@ -67,6 +67,30 @@ export class PlanogramSession {
     private readonly observers: SessionObservers,
   ) {}
 
+  documentRevision():number { const context=this.context();return context.document_revision??context.revision; }
+  startCereal(seed:number, expectedRevision:number):void { this.engine.start_cereal(seed,expectedRevision);this.clearActiveProposal();this.refresh(); }
+  selectAlternative(index:number):void { this.engine.select_alternative(index,this.documentRevision());this.clearActiveProposal();this.refresh(); }
+  duplicateAlternative():void {this.engine.duplicate_alternative(this.documentRevision());this.clearActiveProposal();this.refresh();}
+
+  exportBay(name: string): string {
+    return this.engine.export_bay(name);
+  }
+
+  inspectBay(json: string): string {
+    return this.engine.inspect_bay(json);
+  }
+
+  hasPendingProposal(): boolean {
+    return this.activeProposal !== undefined;
+  }
+
+  restoreBay(json: string, expectedRevision: number): string {
+    const name = this.engine.restore_bay(json, expectedRevision);
+    this.clearActiveProposal();
+    this.refresh();
+    return name;
+  }
+
   context(): EngineContext {
     return this.engine.context();
   }

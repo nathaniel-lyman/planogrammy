@@ -1374,3 +1374,393 @@ fn catalog_uses_one_color_per_brand() {
         assert_eq!(brand_colors.len(), 1, "{brand} should have one brand color");
     }
 }
+
+#[test]
+fn snapshot_replays_all_command_types_and_compensating_history() {
+    let mut draft = DraftVersion::default();
+    let version = draft.id.clone();
+    let target = shelf("shelf_01");
+    draft.validate_snapshot().unwrap();
+    let first = add(&mut draft, "jif_creamy_40", "shelf_01");
+    let id = PlacementId::new(first.affected_ids[0].clone());
+    add(&mut draft, "skippy_creamy_40", "shelf_01");
+    draft.validate_snapshot().unwrap();
+    expect_applied(draft.set_facings(
+        &version,
+        &id,
+        FacingsRequest {
+            facings_x: Some(2),
+            ..Default::default()
+        },
+        draft.revision,
+        "More facings",
+    ));
+    draft.validate_snapshot().unwrap();
+    expect_applied(draft.distribute_shelf(
+        &version,
+        &target,
+        ShelfDistribution::SpaceEvenly,
+        draft.revision,
+        "Distribute",
+    ));
+    draft.validate_snapshot().unwrap();
+    expect_applied(draft.apply_shelf_allocation_as(
+        &version,
+        &target,
+        ShelfAllocationStrategy::FillEvenly,
+        draft.revision,
+        "webmcp",
+        "Fill shelf",
+    ));
+    draft.validate_snapshot().unwrap();
+    let last = draft.latest_undoable_change_set_id().unwrap().clone();
+    expect_applied(draft.undo_change_set(&version, &last, draft.revision));
+    draft.validate_snapshot().unwrap();
+    expect_applied(draft.remove_placement(&version, &id, draft.revision, "Remove"));
+    draft.validate_snapshot().unwrap();
+    let last = draft.latest_undoable_change_set_id().unwrap().clone();
+    expect_applied(draft.undo_change_set(&version, &last, draft.revision));
+    draft.validate_snapshot().unwrap();
+    expect_applied(draft.move_shelf(
+        &version,
+        &shelf("shelf_06"),
+        Length::inches(73),
+        draft.revision,
+        "Move shelf",
+    ));
+    draft.validate_snapshot().unwrap();
+    expect_applied(draft.apply_placement_changes(
+        &version,
+        &[
+            add_change("jif_creamy_16", "shelf_02", 0, None),
+            add_change("skippy_creamy_16", "shelf_02", 1, None),
+        ],
+        draft.revision,
+        "Proposal",
+    ));
+    draft.validate_snapshot().unwrap();
+    while let Some(last) = draft.latest_undoable_change_set_id().cloned() {
+        expect_applied(draft.undo_change_set(&version, &last, draft.revision));
+        draft.validate_snapshot().unwrap();
+    }
+    assert!(draft.placements.is_empty());
+    assert_eq!(draft.fixture, default_fixture());
+}
+
+#[test]
+fn snapshot_rejects_corrupt_geometry_ids_counters_and_history_without_mutating() {
+    let mut draft = DraftVersion::default();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let original = draft.clone();
+    let corruptions: Vec<fn(&mut DraftVersion)> = vec![
+        |draft| draft.next_placement = 1,
+        |draft| draft.next_change_set = 1,
+        |draft| draft.revision = u64::MAX,
+        |draft| draft.placements[0].id = PlacementId::new("duplicate"),
+        |draft| draft.placements.push(draft.placements[0].clone()),
+        |draft| draft.placements[0].x = Length::from_sixteenths(i32::MAX),
+        |draft| draft.products[0].dimensions.width = Length::from_sixteenths(i32::MAX),
+        |draft| draft.fixture.sections[0].shelves[1].section_id = SectionId::new("missing"),
+        |draft| draft.fixture.width = Length::ZERO,
+        |draft| draft.change_sets[0].compensates = Some(ChangeSetId::new("missing")),
+        |draft| draft.change_sets[0].operations.clear(),
+        |draft| {
+            draft.change_sets[0].operations = vec![PlanogramOperation::MoveShelf(MoveShelf {
+                shelf_id: shelf("missing"),
+                before: Length::ZERO,
+                after: Length::from_sixteenths(i32::MAX),
+            })]
+        },
+    ];
+    for corrupt in corruptions {
+        let mut candidate = original.clone();
+        corrupt(&mut candidate);
+        let before = candidate.clone();
+        assert!(candidate.validate_snapshot().is_err());
+        assert_eq!(candidate, before);
+        assert_eq!(draft, original);
+    }
+}
+
+#[test]
+fn cereal_generation_is_reproducible_and_fits_all_supported_bays() {
+    for seed in [0, 20_260_930, u32::MAX] {
+        for bay_count in [6, 8] {
+            let draft = cereal_draft(seed, bay_count).unwrap();
+            assert_eq!(draft, cereal_draft(seed, bay_count).unwrap());
+            assert_eq!(draft.products.len(), 100);
+            assert_eq!(draft.placements.len(), 100);
+            assert_eq!(draft.fixture.width, Length::feet(4 * bay_count as i32));
+            assert_eq!(draft.fixture.height, Length::feet(7));
+            assert_eq!(draft.fixture.sections.len(), bay_count as usize);
+            assert_eq!(draft.revision, 0);
+            assert!(draft.change_sets.is_empty());
+            assert_eq!(draft.next_placement, 101);
+            assert_eq!(draft.next_change_set, 1);
+            assert!(draft.validate_planogram().valid);
+            draft.validate_snapshot().unwrap();
+            let mut ids = HashSet::new();
+            for section in &draft.fixture.sections {
+                assert_eq!(section.width, Length::feet(4));
+                assert_eq!(section.shelves.len(), 6);
+                for shelf in &section.shelves {
+                    assert!(ids.insert(shelf.id.clone()));
+                    assert_eq!(shelf.elevation.sixteenths() % 16, 0);
+                    if shelf.kind == ShelfKind::BaseDeck {
+                        assert_eq!(shelf.elevation, Length::ZERO);
+                        assert!(!draft.placements.iter().any(|p| p.shelf_id == shelf.id));
+                    }
+                }
+            }
+            for view in draft.placement_views() {
+                let shelf = draft.shelf(&view.shelf_id).unwrap();
+                assert_eq!(view.x.sixteenths() % 2, 0);
+                assert!(view.x + view.geometry.display_width <= shelf.width);
+                assert!(view.geometry.required_depth <= shelf.depth);
+                assert!(view.geometry.display_height <= draft.shelf_clearance(shelf));
+                assert!(view.stocked_unit_count > 0);
+            }
+            assert_eq!(
+                draft
+                    .products
+                    .iter()
+                    .map(|p| &p.brand)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                5
+            );
+            assert!(draft
+                .products
+                .iter()
+                .all(|p| p.performance.source.contains("synthetic")
+                    && p.performance.units_per_store_per_week_milliunits > 0
+                    && p.performance.units_per_store_per_week_milliunits < 100_000
+                    && p.casepack_quantity > 0
+                    && p.tray.is_none()));
+        }
+    }
+    let original = cereal_draft(20_260_930, 6).unwrap();
+    let changed_seed = cereal_draft(20_260_931, 6).unwrap();
+    assert_ne!(original.products, changed_seed.products);
+    for count in [0, 1, 4, 7, 9, 16, u32::MAX] {
+        assert!(cereal_draft(20_260_930, count).is_err());
+    }
+}
+
+#[test]
+fn cereal_comparison_uses_explicit_fixed_point_units_and_full_assortment() {
+    let baseline = cereal_draft(20_260_930, 8).unwrap();
+    let target = cereal_draft(20_260_930, 6).unwrap();
+    let comparison = compare_cereal(&baseline, &target);
+    assert_eq!(comparison.products.len(), 100);
+    assert_eq!(comparison.baseline.capacity_units, 1_475);
+    assert_eq!(comparison.current.capacity_units, 1_095);
+    assert_eq!(comparison.baseline.weekly_demand_milliunits, 1_677_501);
+    assert_eq!(comparison.current.weekly_demand_milliunits, 1_677_501);
+    assert_eq!(
+        comparison.baseline.aggregate_days_supply_millidays,
+        Some(6_154)
+    );
+    assert_eq!(
+        comparison.current.aggregate_days_supply_millidays,
+        Some(4_569)
+    );
+    assert_eq!(
+        comparison.baseline.replenishment_turnovers_per_week_milli,
+        129_656
+    );
+    assert_eq!(
+        comparison.current.replenishment_turnovers_per_week_milli,
+        174_249
+    );
+    assert_eq!(comparison.baseline.below_seven_days_sku_count, 67);
+    assert_eq!(comparison.current.below_seven_days_sku_count, 81);
+    for metrics in [&comparison.baseline, &comparison.current] {
+        assert_eq!(metrics.distinct_sku_count, 100);
+        assert_eq!(metrics.expected_sku_count, 100);
+        assert!(metrics.unplaced_product_ids.is_empty());
+        assert_eq!(metrics.validation_issue_count, 0);
+    }
+    assert!(!comparison.baseline.within_six_bay_limit);
+    assert!(comparison.current.within_six_bay_limit);
+    for row in comparison.products {
+        assert_eq!(
+            row.current_days_supply_millidays,
+            Some(row.current_capacity_units * 7_000_000 / row.weekly_demand_milliunits)
+        );
+    }
+    assert_eq!(baseline, cereal_draft(20_260_930, 8).unwrap());
+    assert_eq!(target, cereal_draft(20_260_930, 6).unwrap());
+}
+
+#[test]
+fn cereal_capacity_groups_duplicate_placements_without_counting_demand_twice() {
+    let baseline = cereal_draft(20_260_930, 8).unwrap();
+    let mut target = cereal_draft(20_260_930, 6).unwrap();
+    let version = target.id.clone();
+    let destination = shelf("bay_06_shelf_05");
+    let removals = target
+        .placements
+        .iter()
+        .filter(|p| p.shelf_id == destination)
+        .map(|p| PlacementChange::Remove {
+            placement_id: p.id.clone(),
+        })
+        .collect::<Vec<_>>();
+    expect_applied(target.apply_placement_changes_as(&version, &removals, 0, "human", "Make room"));
+    let before = compare_cereal(&baseline, &target);
+    let existing_product = target.placements[0].product_id.clone();
+    let added = add(&mut target, &existing_product.0, &destination.0);
+    let new_id = PlacementId::new("placement_0101");
+    assert!(added.affected_ids.contains(&new_id.0));
+    let after = compare_cereal(&baseline, &target);
+    assert_eq!(
+        before.current.weekly_demand_milliunits,
+        after.current.weekly_demand_milliunits
+    );
+    assert_eq!(
+        before.current.stocked_weekly_demand_milliunits,
+        after.current.stocked_weekly_demand_milliunits
+    );
+    assert_eq!(
+        before.current.distinct_sku_count,
+        after.current.distinct_sku_count
+    );
+    assert_eq!(
+        after.current.capacity_units,
+        before.current.capacity_units
+            + u64::from(target.placement_view(&new_id).unwrap().stocked_unit_count)
+    );
+    target.validate_snapshot().unwrap();
+}
+
+#[test]
+fn cereal_missing_skus_and_invalid_fit_stay_visible_without_reducing_demand() {
+    let baseline = cereal_draft(20_260_930, 8).unwrap();
+    let mut target = cereal_draft(20_260_930, 6).unwrap();
+    let version = target.id.clone();
+    let removed = target.placements[0].clone();
+    expect_applied(target.remove_placement(&version, &removed.id, 0, "Remove one SKU"));
+    let comparison = compare_cereal(&baseline, &target);
+    assert_eq!(
+        comparison.current.unplaced_product_ids,
+        vec![removed.product_id.clone()]
+    );
+    assert_eq!(comparison.current.distinct_sku_count, 99);
+    assert_eq!(comparison.current.expected_sku_count, 100);
+    assert_eq!(
+        comparison.current.weekly_demand_milliunits,
+        comparison.baseline.weekly_demand_milliunits
+    );
+    let row = comparison
+        .products
+        .iter()
+        .find(|row| row.product_id == removed.product_id)
+        .unwrap();
+    assert_eq!(row.current_capacity_units, 0);
+    assert_eq!(row.current_days_supply_millidays, Some(0));
+    target.validate_snapshot().unwrap();
+    target.placements[0].x = Length::feet(4);
+    assert!(
+        compare_cereal(&baseline, &target)
+            .current
+            .validation_issue_count
+            > 0
+    );
+    assert!(target.validate_snapshot().is_err());
+}
+
+#[test]
+fn cereal_cross_bay_move_and_undo_preserve_exact_history_and_baseline() {
+    let baseline = cereal_draft(20_260_930, 8).unwrap();
+    let mut target = cereal_draft(20_260_930, 6).unwrap();
+    let version = target.id.clone();
+    let destination = shelf("bay_02_shelf_01");
+    let removals = target
+        .placements
+        .iter()
+        .filter(|p| p.shelf_id == destination)
+        .map(|p| PlacementChange::Remove {
+            placement_id: p.id.clone(),
+        })
+        .collect::<Vec<_>>();
+    expect_applied(target.apply_placement_changes_as(
+        &version,
+        &removals,
+        0,
+        "human",
+        "Clear target shelf",
+    ));
+    let original = target.clone();
+    let placement = target.placements[0].clone();
+    assert_ne!(
+        target.shelf(&placement.shelf_id).unwrap().section_id,
+        target.shelf(&destination).unwrap().section_id
+    );
+    let moved = expect_applied(target.move_placement(
+        &version,
+        &placement.id,
+        &destination,
+        Length::from_sixteenths(2),
+        target.revision,
+        "Move to neighboring bay",
+    ));
+    assert_eq!(
+        target.placement(&placement.id).unwrap().shelf_id,
+        destination
+    );
+    assert_eq!(
+        target.placement(&placement.id).unwrap().x,
+        Length::from_sixteenths(2)
+    );
+    assert_eq!(moved.change_set.operations.len(), 1);
+    target.validate_snapshot().unwrap();
+    let mut reopened = target.clone();
+    let undone =
+        expect_applied(reopened.undo_change_set(&version, &moved.change_set.id, reopened.revision));
+    assert_eq!(reopened.placements, original.placements);
+    assert_eq!(reopened.fixture, original.fixture);
+    assert_eq!(undone.change_set.compensates, Some(moved.change_set.id));
+    assert_eq!(reopened.revision, original.revision + 2);
+    reopened.validate_snapshot().unwrap();
+    assert_eq!(baseline, cereal_draft(20_260_930, 8).unwrap());
+    let selected = shelf("bay_01_shelf_02");
+    let shelf_move = expect_applied(reopened.move_shelf(
+        &version,
+        &selected,
+        Length::inches(24),
+        reopened.revision,
+        "Move shelf inside its own bay",
+    ));
+    assert_eq!(
+        reopened.shelf(&shelf("bay_02_shelf_02")).unwrap().elevation,
+        Length::inches(23)
+    );
+    reopened.validate_snapshot().unwrap();
+    expect_applied(reopened.undo_change_set(
+        &version,
+        &shelf_move.change_set.id,
+        reopened.revision,
+    ));
+    reopened.validate_snapshot().unwrap();
+}
+
+#[test]
+fn cereal_snapshot_rejects_changed_genesis_and_unsupported_generator_version() {
+    let original = cereal_draft(20_260_930, 6).unwrap();
+    let mut changed = original.clone();
+    changed.products[0]
+        .performance
+        .units_per_store_per_week_milliunits += 1;
+    assert!(changed.validate_snapshot().is_err());
+    changed = original.clone();
+    changed.fixture.sections[0].width = Length::inches(49);
+    assert!(changed.validate_snapshot().is_err());
+    changed = original.clone();
+    changed.scenario_origin.as_mut().unwrap().generator_version = 2;
+    assert!(changed.validate_snapshot().is_err());
+    changed = original.clone();
+    changed.scenario_origin.as_mut().unwrap().bay_count = 7;
+    assert!(changed.validate_snapshot().is_err());
+    assert_eq!(original, cereal_draft(20_260_930, 6).unwrap());
+}

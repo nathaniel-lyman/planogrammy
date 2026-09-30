@@ -140,3 +140,6 @@ export function reflowOperation(placement: Placement, after: Partial<Pick<Placem
   const configuration = (source: Placement) => ({ shelf_id: source.shelf_id, x: source.x, facings_x: source.facings_x, facings_y: source.facings_y, facings_z: source.facings_z });
   return { type: 'reflow_placement', placement_id: placement.id, before: configuration(placement), after: configuration({ ...placement, ...after }) };
 }
+
+/** Opaque transport text; only Rust reads or resolves the document contents. */
+export const BAY_FILE_TEXT = '{"format":"planogrammy-bay","format_version":1,"name":"Peanut butter bay","draft":{}}';

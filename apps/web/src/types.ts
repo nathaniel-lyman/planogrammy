@@ -28,6 +28,8 @@ export interface Fixture {
 }
 
 export interface EngineContext {
+  document_revision?: number;
+  scenario?: ScenarioView | null;
   version_id: string;
   version_status: 'draft' | 'proposed' | 'published' | 'archived';
   revision: number;
@@ -174,6 +176,13 @@ export type PreviewResult =
   | { status: 'forbidden' | 'invalid_command'; message: string };
 
 export interface WasmEngine {
+  start_cereal(seed:number, expectedDocumentRevision:number):void;
+  select_alternative(index:number, expectedDocumentRevision:number):void;
+  duplicate_alternative(expectedDocumentRevision:number):void;
+  focus_bay(shelfId:string):void;
+  export_bay(name: string): string;
+  inspect_bay(json: string): string;
+  restore_bay(json: string, expectedRevision: number): string;
   initialize_renderer(canvasId: string): Promise<void>;
   context(): EngineContext;
   validate_planogram(): PlanogramValidationResult;
@@ -206,3 +215,8 @@ export interface WasmEngine {
   pan_by(dx: number, dy: number): void;
   fit_fixture(): void;
 }
+
+export interface ScenarioMetrics {
+ bay_count:number; distinct_sku_count:number; expected_sku_count:number; unplaced_product_ids:string[]; capacity_units:number; weekly_demand_milliunits:number; stocked_weekly_demand_milliunits:number; aggregate_days_supply_millidays:number|null; replenishment_turnovers_per_week_milli:number; below_seven_days_sku_count:number; validation_issue_count:number; within_six_bay_limit:boolean;
+}
+export interface ScenarioView { seed:number; active:number|null; alternatives:string[]; comparison:{assumptions:Record<string,string|number>;baseline:ScenarioMetrics;current:ScenarioMetrics;products:Array<{product_id:string;description:string;weekly_demand_milliunits:number;baseline_capacity_units:number;current_capacity_units:number;baseline_days_supply_millidays:number|null;current_days_supply_millidays:number|null}>} }
