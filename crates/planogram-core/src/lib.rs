@@ -248,6 +248,25 @@ pub struct Product {
     pub lid_color: [u8; 3],
 }
 
+/// The physical package silhouette the renderer draws for one unit. Derived
+/// from the catalog category so saved files and the generator stay unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageShape {
+    Jar,
+    Box,
+}
+
+impl Product {
+    pub fn package_shape(&self) -> PackageShape {
+        if self.category.to_ascii_lowercase().contains("cereal") {
+            PackageShape::Box
+        } else {
+            PackageShape::Jar
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     pub id: PlacementId,
@@ -523,6 +542,7 @@ pub struct PlacementSceneNode {
     pub facings_y: u32,
     pub facings_z: u32,
     pub tray_front_lip_height: Option<Length>,
+    pub package_shape: PackageShape,
     pub color: [u8; 3],
     pub lid_color: [u8; 3],
 }
@@ -1250,6 +1270,7 @@ impl DraftVersion {
                     facings_y: view.facings_y,
                     facings_z: view.facings_z,
                     tray_front_lip_height: view.tray_front_lip_height,
+                    package_shape: product.package_shape(),
                     color: product.color,
                     lid_color: product.lid_color,
                 })

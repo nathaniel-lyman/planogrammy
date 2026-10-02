@@ -144,6 +144,7 @@ describe('PlanogramSession proposal lifecycle', () => {
       facings_y: 1,
       facings_z: 4,
       tray_front_lip_height: 20,
+      package_shape: 'jar',
       color: [1, 2, 3],
       lid_color: [4, 5, 6],
     }];

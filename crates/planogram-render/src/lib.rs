@@ -1,5 +1,16 @@
-use planogram_core::{Length, PlacementId, RenderScene, ScenePatch, ShelfId, ShelfKind};
+use planogram_core::{Length, PlacementId, ProductId, RenderScene, ScenePatch, ShelfId, ShelfKind};
 use serde::{Deserialize, Serialize};
+
+pub use paint::{scene_vertices, Vertex};
+
+/// Screen-space padding kept around the fitted fixture so the canvas heading
+/// and help strip never overlap the frame.
+const FIT_MARGIN_X: f32 = 56.0;
+const FIT_MARGIN_Y: f32 = 124.0;
+/// Pointer distance (CSS px) inside which a shelf line wins over the products
+/// sitting on it, so full shelves stay grabbable.
+const SHELF_GRAB_PRIORITY: f32 = 5.0;
+const SHELF_GRAB_TOLERANCE: f32 = 13.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
@@ -28,6 +39,18 @@ pub enum Selection {
 pub enum HitTarget {
     Shelf { id: ShelfId },
     Placement { id: PlacementId, shelf_id: ShelfId },
+}
+
+/// Screen rectangle (CSS px) of one placement, for HTML label overlays. The
+/// renderer stays text-free; React positions text from this derived view.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlacementLabel {
+    pub id: PlacementId,
+    pub product_id: ProductId,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -76,6 +99,10 @@ impl RenderModel {
         self.viewport_height = height.max(1.0);
     }
 
+    pub fn viewport(&self) -> (f32, f32) {
+        (self.viewport_width, self.viewport_height)
+    }
+
     pub fn fit(&mut self) {
         self.camera = Camera {
             zoom: 1.0,
@@ -96,8 +123,10 @@ impl RenderModel {
         };
         let bay_width = shelf.width.sixteenths() as f32;
         let bay_center = shelf.x.sixteenths() as f32 + bay_width / 2.0;
-        let scale = ((self.viewport_width - 180.0).max(120.0) / bay_width)
-            .min((self.viewport_height - 220.0).max(180.0) / self.scene.height.sixteenths() as f32);
+        let scale = ((self.viewport_width - FIT_MARGIN_X).max(120.0) / bay_width).min(
+            (self.viewport_height - FIT_MARGIN_Y).max(180.0)
+                / self.scene.height.sixteenths() as f32,
+        );
         let base_scale = self.fit_scale() / self.camera.zoom;
         self.camera.zoom = (scale / base_scale).clamp(0.35, 16.0);
         self.camera.pan_x =
@@ -173,9 +202,9 @@ impl RenderModel {
 
     fn fit_scale(&self) -> f32 {
         let horizontal =
-            (self.viewport_width - 180.0).max(120.0) / self.scene.width.sixteenths() as f32;
-        let vertical =
-            (self.viewport_height - 220.0).max(180.0) / self.scene.height.sixteenths() as f32;
+            (self.viewport_width - FIT_MARGIN_X).max(120.0) / self.scene.width.sixteenths() as f32;
+        let vertical = (self.viewport_height - FIT_MARGIN_Y).max(180.0)
+            / self.scene.height.sixteenths() as f32;
         horizontal.min(vertical) * self.camera.zoom
     }
 
@@ -198,35 +227,25 @@ impl RenderModel {
         )
     }
 
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTarget> {
-        let (left, _) = self.world_to_screen(Length::ZERO, Length::ZERO);
-        let (right, _) = self.world_to_screen(self.scene.width, Length::ZERO);
-        if x < left - 12.0 || x > right + 12.0 {
-            return None;
-        }
+    /// Screen rectangle of a placement: (left, top, right, bottom).
+    fn placement_rect(
+        &self,
+        placement: &planogram_core::PlacementSceneNode,
+    ) -> Option<(f32, f32, f32, f32)> {
+        let shelf = self
+            .scene
+            .shelves
+            .iter()
+            .find(|shelf| shelf.id == placement.shelf_id)?;
+        let (x1, shelf_y) = self.world_to_screen(shelf.x + placement.x, shelf.elevation);
+        let (x2, product_top) = self.world_to_screen(
+            shelf.x + placement.x + placement.width,
+            shelf.elevation + placement.height,
+        );
+        Some((x1, product_top, x2, shelf_y))
+    }
 
-        if let Some(placement) = self.scene.placements.iter().rev().find(|placement| {
-            let Some(shelf) = self
-                .scene
-                .shelves
-                .iter()
-                .find(|shelf| shelf.id == placement.shelf_id)
-            else {
-                return false;
-            };
-            let (x1, shelf_y) = self.world_to_screen(shelf.x + placement.x, shelf.elevation);
-            let (x2, product_top) = self.world_to_screen(
-                shelf.x + placement.x + placement.width,
-                shelf.elevation + placement.height,
-            );
-            x >= x1 && x <= x2 && y >= product_top && y <= shelf_y
-        }) {
-            return Some(HitTarget::Placement {
-                id: placement.id.clone(),
-                shelf_id: placement.shelf_id.clone(),
-            });
-        }
-
+    fn nearest_shelf_within(&self, x: f32, y: f32, tolerance: f32) -> Option<HitTarget> {
         self.scene
             .shelves
             .iter()
@@ -244,10 +263,62 @@ impl RenderModel {
             })
             .and_then(|shelf| {
                 let sy = self.world_to_screen(Length::ZERO, shelf.elevation).1;
-                ((sy - y).abs() <= 13.0).then(|| HitTarget::Shelf {
+                ((sy - y).abs() <= tolerance).then(|| HitTarget::Shelf {
                     id: shelf.id.clone(),
                 })
             })
+    }
+
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTarget> {
+        let (left, _) = self.world_to_screen(Length::ZERO, Length::ZERO);
+        let (right, _) = self.world_to_screen(self.scene.width, Length::ZERO);
+        if x < left - 12.0 || x > right + 12.0 {
+            return None;
+        }
+
+        // A pointer right on the shelf line grabs the shelf even when products
+        // sit on it; anywhere else inside a product selects the product.
+        if let Some(shelf) = self.nearest_shelf_within(x, y, SHELF_GRAB_PRIORITY) {
+            return Some(shelf);
+        }
+
+        if let Some(placement) = self.scene.placements.iter().rev().find(|placement| {
+            self.placement_rect(placement)
+                .is_some_and(|(x1, top, x2, bottom)| x >= x1 && x <= x2 && y >= top && y <= bottom)
+        }) {
+            return Some(HitTarget::Placement {
+                id: placement.id.clone(),
+                shelf_id: placement.shelf_id.clone(),
+            });
+        }
+
+        self.nearest_shelf_within(x, y, SHELF_GRAB_TOLERANCE)
+    }
+
+    /// Placements large enough on screen to carry a text label, clipped to the
+    /// viewport. Camera-only; never touches authoritative geometry.
+    pub fn placement_labels(&self, min_width: f32, min_height: f32) -> Vec<PlacementLabel> {
+        self.scene
+            .placements
+            .iter()
+            .filter_map(|placement| {
+                let (x1, top, x2, bottom) = self.placement_rect(placement)?;
+                let width = x2 - x1;
+                let height = bottom - top;
+                let visible = x2 > 0.0
+                    && x1 < self.viewport_width
+                    && bottom > 0.0
+                    && top < self.viewport_height;
+                (visible && width >= min_width && height >= min_height).then(|| PlacementLabel {
+                    id: placement.id.clone(),
+                    product_id: placement.product_id.clone(),
+                    x: x1,
+                    y: top,
+                    width,
+                    height,
+                })
+            })
+            .collect()
     }
 
     pub fn select(&mut self, selection: Option<Selection>) {
@@ -297,20 +368,625 @@ impl RenderModel {
     }
 }
 
+/// Platform-independent scene painting: turns the render model into a flat
+/// list of colored triangles. Everything here is presentation only; the
+/// authoritative geometry is read, never written.
+mod paint {
+    use super::{RenderModel, Selection};
+    use bytemuck::{Pod, Zeroable};
+    use planogram_core::{Length, PackageShape, PlacementSceneNode, ShelfKind, StockingMode};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+    pub struct Vertex {
+        pub position: [f32; 2],
+        pub color: [f32; 4],
+    }
+
+    type Rgba = [f32; 4];
+
+    const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
+    const BLACK: Rgba = [0.0, 0.0, 0.0, 1.0];
+    const PAPER: Rgba = [0.985, 0.975, 0.95, 1.0];
+    const PANEL_TOP: Rgba = [0.925, 0.92, 0.905, 1.0];
+    const PANEL_BOTTOM: Rgba = [0.885, 0.88, 0.865, 1.0];
+    const FRAME: Rgba = [0.17, 0.19, 0.21, 1.0];
+    const FRAME_EDGE: Rgba = [0.30, 0.32, 0.34, 1.0];
+    const SHELF_TOP: Rgba = [0.60, 0.62, 0.64, 1.0];
+    const SHELF_BOTTOM: Rgba = [0.34, 0.36, 0.38, 1.0];
+    const SHELF_HIGHLIGHT: Rgba = [0.86, 0.87, 0.88, 1.0];
+    const SELECTED: Rgba = [0.08, 0.35, 0.92, 1.0];
+    const INVALID: Rgba = [0.78, 0.16, 0.15, 1.0];
+    const PROPOSAL: Rgba = [0.93, 0.55, 0.08, 0.92];
+    const PROPOSAL_FILL: Rgba = [0.95, 0.63, 0.16, 0.24];
+    const REMOVED: Rgba = [0.78, 0.20, 0.16, 0.9];
+    const DRAG_GUIDE: Rgba = [0.94, 0.58, 0.08, 0.9];
+
+    const SHELF_THICKNESS: f32 = 5.0;
+    const BASE_DECK_THICKNESS: f32 = 10.0;
+    const SHELF_SHADOW: f32 = 9.0;
+
+    struct Painter {
+        vertices: Vec<Vertex>,
+        width: f32,
+        height: f32,
+    }
+
+    impl Painter {
+        fn ndc(&self, x: f32, y: f32) -> [f32; 2] {
+            [x / self.width * 2.0 - 1.0, 1.0 - y / self.height * 2.0]
+        }
+
+        /// Corner colors run top-left, top-right, bottom-right, bottom-left.
+        fn quad(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, colors: [Rgba; 4]) {
+            if x2 <= x1 || y2 <= y1 {
+                return;
+            }
+            let a = Vertex {
+                position: self.ndc(x1, y1),
+                color: colors[0],
+            };
+            let b = Vertex {
+                position: self.ndc(x2, y1),
+                color: colors[1],
+            };
+            let c = Vertex {
+                position: self.ndc(x2, y2),
+                color: colors[2],
+            };
+            let d = Vertex {
+                position: self.ndc(x1, y2),
+                color: colors[3],
+            };
+            self.vertices.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+
+        fn rect(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: Rgba) {
+            self.quad(x1, y1, x2, y2, [color; 4]);
+        }
+
+        fn vgradient(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, top: Rgba, bottom: Rgba) {
+            self.quad(x1, y1, x2, y2, [top, top, bottom, bottom]);
+        }
+
+        fn hgradient(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, left: Rgba, right: Rgba) {
+            self.quad(x1, y1, x2, y2, [left, right, right, left]);
+        }
+
+        fn dashed_outline(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: Rgba) {
+            let dash = 7.0;
+            let gap = 5.0;
+            let mut x = x1;
+            while x < x2 {
+                let end = (x + dash).min(x2);
+                self.rect(x, y1, end, y1 + 2.0, color);
+                self.rect(x, y2 - 2.0, end, y2, color);
+                x += dash + gap;
+            }
+            let mut y = y1;
+            while y < y2 {
+                let end = (y + dash).min(y2);
+                self.rect(x1, y, x1 + 2.0, end, color);
+                self.rect(x2 - 2.0, y, x2, end, color);
+                y += dash + gap;
+            }
+        }
+    }
+
+    fn rgb(color: [u8; 3]) -> Rgba {
+        [
+            color[0] as f32 / 255.0,
+            color[1] as f32 / 255.0,
+            color[2] as f32 / 255.0,
+            1.0,
+        ]
+    }
+
+    fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+            a[3],
+        ]
+    }
+
+    fn lighten(color: Rgba, t: f32) -> Rgba {
+        mix(color, WHITE, t)
+    }
+
+    fn darken(color: Rgba, t: f32) -> Rgba {
+        mix(color, BLACK, t)
+    }
+
+    fn alpha(color: Rgba, a: f32) -> Rgba {
+        [color[0], color[1], color[2], a]
+    }
+
+    fn shade(a: f32) -> Rgba {
+        [0.0, 0.0, 0.0, a]
+    }
+
+    fn glow(a: f32) -> Rgba {
+        [1.0, 1.0, 1.0, a]
+    }
+
+    fn fnv1a(text: &str) -> u32 {
+        text.bytes().fold(0x811c_9dc5u32, |hash, byte| {
+            (hash ^ byte as u32).wrapping_mul(0x0100_0193)
+        })
+    }
+
+    fn rgb_to_hsl([r, g, b, _]: Rgba) -> (f32, f32, f32) {
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let l = (max + min) / 2.0;
+        if (max - min).abs() < f32::EPSILON {
+            return (0.0, 0.0, l);
+        }
+        let d = max - min;
+        let s = if l > 0.5 {
+            d / (2.0 - max - min)
+        } else {
+            d / (max + min)
+        };
+        let h = if max == r {
+            (g - b) / d + if g < b { 6.0 } else { 0.0 }
+        } else if max == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        } / 6.0;
+        (h, s, l)
+    }
+
+    fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Rgba {
+        if s <= 0.0 {
+            return [l, l, l, 1.0];
+        }
+        let q = if l < 0.5 {
+            l * (1.0 + s)
+        } else {
+            l + s - l * s
+        };
+        let p = 2.0 * l - q;
+        let channel = |mut t: f32| {
+            if t < 0.0 {
+                t += 1.0;
+            }
+            if t > 1.0 {
+                t -= 1.0;
+            }
+            if t < 1.0 / 6.0 {
+                p + (q - p) * 6.0 * t
+            } else if t < 0.5 {
+                q
+            } else if t < 2.0 / 3.0 {
+                p + (q - p) * (2.0 / 3.0 - t) * 6.0
+            } else {
+                p
+            }
+        };
+        [
+            channel(h + 1.0 / 3.0),
+            channel(h),
+            channel(h - 1.0 / 3.0),
+            1.0,
+        ]
+    }
+
+    /// Deterministic per-SKU variation of the brand color, so sibling SKUs of
+    /// one brand stay in the family but no longer render as identical blocks.
+    pub(super) fn sku_color(brand: [u8; 3], product_id: &str) -> Rgba {
+        let hash = fnv1a(product_id);
+        let hue_shift = ((hash & 0xff) as f32 / 255.0 - 0.5) * 0.06;
+        let light_shift = (((hash >> 8) & 0xff) as f32 / 255.0 - 0.5) * 0.12;
+        let (h, s, l) = rgb_to_hsl(rgb(brand));
+        hsl_to_rgb(
+            (h + hue_shift).rem_euclid(1.0),
+            s,
+            (l + light_shift).clamp(0.12, 0.88),
+        )
+    }
+
+    /// The lid or brand-band color. A near-white lid (the cereal catalog's
+    /// cream) would wash the band out, so it falls back to a deep body tone.
+    fn package_accent(body: Rgba, lid: Rgba) -> Rgba {
+        let luminance = 0.2126 * lid[0] + 0.7152 * lid[1] + 0.0722 * lid[2];
+        if luminance > 0.82 {
+            darken(body, 0.38)
+        } else {
+            lid
+        }
+    }
+
+    struct Unit {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    }
+
+    impl Unit {
+        fn width(&self) -> f32 {
+            self.x2 - self.x1
+        }
+
+        fn height(&self) -> f32 {
+            self.y2 - self.y1
+        }
+
+        /// Enough pixels to show a lid, label and shading rather than a swatch.
+        fn detailed(&self) -> bool {
+            self.width() >= 7.0 && self.height() >= 10.0
+        }
+
+        fn fine(&self) -> bool {
+            self.width() >= 18.0 && self.height() >= 24.0
+        }
+    }
+
+    fn paint_jar(p: &mut Painter, u: &Unit, body: Rgba, lid: Rgba) {
+        if !u.detailed() {
+            p.vgradient(
+                u.x1,
+                u.y1,
+                u.x2,
+                u.y2,
+                lighten(body, 0.08),
+                darken(body, 0.12),
+            );
+            return;
+        }
+        let w = u.width();
+        let lid_h = (u.height() * 0.15).max(2.0);
+        let lid_inset = w * 0.07;
+        p.vgradient(
+            u.x1 + lid_inset,
+            u.y1,
+            u.x2 - lid_inset,
+            u.y1 + lid_h,
+            lighten(lid, 0.18),
+            darken(lid, 0.18),
+        );
+        p.rect(
+            u.x1 + lid_inset,
+            u.y1,
+            u.x2 - lid_inset,
+            u.y1 + 1.0,
+            glow(0.35),
+        );
+        let body_top = u.y1 + lid_h;
+        p.vgradient(
+            u.x1,
+            body_top,
+            u.x2,
+            u.y2,
+            lighten(body, 0.10),
+            darken(body, 0.14),
+        );
+        if u.fine() {
+            let body_h = u.y2 - body_top;
+            let label_top = body_top + body_h * 0.22;
+            let label_bottom = body_top + body_h * 0.80;
+            p.rect(
+                u.x1 + w * 0.06,
+                label_top,
+                u.x2 - w * 0.06,
+                label_bottom,
+                mix(body, PAPER, 0.74),
+            );
+            let stripe_y = label_top + (label_bottom - label_top) * 0.38;
+            p.rect(
+                u.x1 + w * 0.12,
+                stripe_y,
+                u.x2 - w * 0.12,
+                stripe_y + (label_bottom - label_top) * 0.16,
+                alpha(body, 0.85),
+            );
+        }
+        // Cylinder shading: a soft highlight down the left, shadow on the right.
+        p.hgradient(u.x1, body_top, u.x1 + w * 0.22, u.y2, glow(0.22), glow(0.0));
+        p.hgradient(
+            u.x2 - w * 0.30,
+            body_top,
+            u.x2,
+            u.y2,
+            shade(0.0),
+            shade(0.26),
+        );
+        p.vgradient(u.x1, u.y2 - 3.0, u.x2, u.y2, shade(0.0), shade(0.28));
+    }
+
+    fn paint_box(p: &mut Painter, u: &Unit, body: Rgba, accent: Rgba) {
+        if !u.detailed() {
+            p.vgradient(
+                u.x1,
+                u.y1,
+                u.x2,
+                u.y2,
+                lighten(body, 0.06),
+                darken(body, 0.10),
+            );
+            return;
+        }
+        let w = u.width();
+        let h = u.height();
+        let side = w * 0.07;
+        let front_right = u.x2 - side;
+        p.vgradient(
+            u.x1,
+            u.y1,
+            u.x2,
+            u.y2,
+            lighten(body, 0.06),
+            darken(body, 0.10),
+        );
+        p.rect(front_right, u.y1, u.x2, u.y2, shade(0.24));
+        let band_h = h * 0.16;
+        p.vgradient(
+            u.x1,
+            u.y1,
+            front_right,
+            u.y1 + band_h,
+            lighten(accent, 0.10),
+            darken(accent, 0.06),
+        );
+        if u.fine() {
+            let px1 = u.x1 + w * 0.09;
+            let px2 = front_right - w * 0.09;
+            let py1 = u.y1 + band_h + h * 0.10;
+            let py2 = u.y2 - h * 0.10;
+            p.vgradient(
+                px1,
+                py1,
+                px2,
+                py2,
+                mix(body, PAPER, 0.58),
+                mix(body, PAPER, 0.36),
+            );
+            p.rect(px1, py2 - (py2 - py1) * 0.18, px2, py2, alpha(accent, 0.6));
+        }
+        p.rect(u.x1, u.y1, front_right, u.y1 + 1.0, glow(0.30));
+        p.vgradient(u.x1, u.y2 - 3.0, u.x2, u.y2, shade(0.0), shade(0.25));
+    }
+
+    fn paint_placement(
+        p: &mut Painter,
+        model: &RenderModel,
+        placement: &PlacementSceneNode,
+        rect: (f32, f32, f32, f32),
+    ) {
+        let (x1, top, x2, bottom) = rect;
+        if matches!(
+            &model.selected,
+            Some(Selection::Placement { id }) if id == &placement.id
+        ) {
+            p.rect(x1 - 3.0, top - 3.0, x2 + 3.0, bottom + 3.0, SELECTED);
+        }
+        let body = sku_color(placement.color, &placement.product_id.0);
+        let accent = package_accent(body, rgb(placement.lid_color));
+        let cols = placement.facings_x.max(1);
+        let rows = if placement.stocking_mode == StockingMode::Tray {
+            1
+        } else {
+            placement.facings_y.max(1)
+        };
+        let unit_w = (x2 - x1) / cols as f32;
+        let unit_h = (bottom - top) / rows as f32;
+        let gap = if unit_w < 4.0 {
+            0.0
+        } else {
+            (unit_w * 0.05).clamp(0.5, 2.0)
+        };
+        for row in 0..rows {
+            for col in 0..cols {
+                let unit = Unit {
+                    x1: x1 + unit_w * col as f32 + gap / 2.0,
+                    y1: bottom - unit_h * (row + 1) as f32 + gap,
+                    x2: x1 + unit_w * (col + 1) as f32 - gap / 2.0,
+                    y2: bottom - unit_h * row as f32,
+                };
+                match placement.package_shape {
+                    PackageShape::Jar => paint_jar(p, &unit, body, accent),
+                    PackageShape::Box => paint_box(p, &unit, body, accent),
+                }
+            }
+        }
+        if placement.stocking_mode == StockingMode::Tray {
+            if let Some(front_lip_height) = placement.tray_front_lip_height {
+                let shelf = model
+                    .scene
+                    .shelves
+                    .iter()
+                    .find(|shelf| shelf.id == placement.shelf_id);
+                if let Some(shelf) = shelf {
+                    let (_, lip_top) = model
+                        .world_to_screen(shelf.x + placement.x, shelf.elevation + front_lip_height);
+                    let lip_top = lip_top.max(top);
+                    p.vgradient(x1, lip_top, x2, bottom, shade(0.30), shade(0.44));
+                    p.rect(x1, lip_top, x2, lip_top + 1.5, glow(0.62));
+                }
+            }
+        }
+    }
+
+    pub fn scene_vertices(model: &RenderModel) -> Vec<Vertex> {
+        let (width, height) = model.viewport();
+        let mut p = Painter {
+            vertices: Vec::new(),
+            width,
+            height,
+        };
+        let (_, base_y) = model.world_to_screen(Length::ZERO, Length::ZERO);
+        let (_, top_y) = model.world_to_screen(model.scene.width, model.scene.height);
+
+        // Each base deck identifies a physical bay: back panel, top rail and
+        // uprights stay visible when the whole category is fitted.
+        for bay in model
+            .scene
+            .shelves
+            .iter()
+            .filter(|shelf| shelf.kind == ShelfKind::BaseDeck)
+        {
+            let bay_left = model.world_to_screen(bay.x, Length::ZERO).0;
+            let bay_right = model.world_to_screen(bay.x + bay.width, Length::ZERO).0;
+            p.vgradient(bay_left, top_y, bay_right, base_y, PANEL_TOP, PANEL_BOTTOM);
+            p.rect(bay_left, top_y - 1.0, bay_right, top_y + 4.0, FRAME);
+            for upright in [bay_left, bay_right] {
+                p.rect(
+                    upright - 2.5,
+                    top_y - 1.0,
+                    upright + 2.5,
+                    base_y + 6.0,
+                    FRAME,
+                );
+                p.rect(
+                    upright - 2.5,
+                    top_y - 1.0,
+                    upright - 1.5,
+                    base_y + 6.0,
+                    FRAME_EDGE,
+                );
+            }
+        }
+
+        for placement in &model.scene.placements {
+            if let Some(rect) = model.placement_rect(placement) {
+                paint_placement(&mut p, model, placement, rect);
+            }
+        }
+
+        // Shelves paint after products so the lip sits in front of what rests
+        // on it and its shadow falls onto the shelf below.
+        for shelf in &model.scene.shelves {
+            let elevation = model
+                .drag
+                .as_ref()
+                .filter(|drag| drag.shelf_id == shelf.id)
+                .map(|drag| drag.elevation)
+                .unwrap_or(shelf.elevation);
+            let (left, y) = model.world_to_screen(shelf.x, elevation);
+            let right = model.world_to_screen(shelf.x + shelf.width, elevation).0;
+            let selected = matches!(
+                &model.selected,
+                Some(Selection::Shelf { id }) if id == &shelf.id
+            );
+            let highlight = if model.validation_error.is_some() && selected {
+                Some(INVALID)
+            } else if selected {
+                Some(SELECTED)
+            } else {
+                None
+            };
+            if shelf.kind == ShelfKind::BaseDeck {
+                let half = BASE_DECK_THICKNESS / 2.0;
+                p.vgradient(left, y - half, right, y + half, FRAME_EDGE, FRAME);
+                p.rect(left, y - half, right, y - half + 1.0, SHELF_HIGHLIGHT);
+                if let Some(color) = highlight {
+                    p.rect(left, y - half, right, y - half + 2.0, color);
+                }
+                continue;
+            }
+            let half = SHELF_THICKNESS / 2.0;
+            p.vgradient(
+                left,
+                y + half,
+                right,
+                y + half + SHELF_SHADOW,
+                shade(0.16),
+                shade(0.0),
+            );
+            match highlight {
+                Some(color) => {
+                    p.vgradient(
+                        left,
+                        y - half - 1.0,
+                        right,
+                        y + half + 1.0,
+                        lighten(color, 0.12),
+                        darken(color, 0.12),
+                    );
+                }
+                None => {
+                    p.vgradient(left, y - half, right, y + half, SHELF_TOP, SHELF_BOTTOM);
+                    p.rect(left, y - half, right, y - half + 1.0, SHELF_HIGHLIGHT);
+                }
+            }
+        }
+
+        if let Some(proposal_scene) = &model.proposal_scene {
+            for placement in proposal_scene
+                .placements
+                .iter()
+                .filter(|placement| model.proposal_affected_ids.contains(&placement.id.0))
+            {
+                let Some(shelf) = proposal_scene
+                    .shelves
+                    .iter()
+                    .find(|shelf| shelf.id == placement.shelf_id)
+                else {
+                    continue;
+                };
+                let (x1, shelf_y) = model.world_to_screen(shelf.x + placement.x, shelf.elevation);
+                let (x2, product_top) = model.world_to_screen(
+                    shelf.x + placement.x + placement.width,
+                    shelf.elevation + placement.height,
+                );
+                p.rect(
+                    x1 + 2.0,
+                    product_top + 2.0,
+                    x2 - 2.0,
+                    shelf_y - 2.0,
+                    PROPOSAL_FILL,
+                );
+                p.dashed_outline(
+                    x1 - 2.0,
+                    product_top - 2.0,
+                    x2 + 2.0,
+                    shelf_y + 2.0,
+                    PROPOSAL,
+                );
+            }
+            for placement in model.scene.placements.iter().filter(|placement| {
+                model.proposal_affected_ids.contains(&placement.id.0)
+                    && !proposal_scene
+                        .placements
+                        .iter()
+                        .any(|candidate| candidate.id == placement.id)
+            }) {
+                if let Some((x1, top, x2, bottom)) = model.placement_rect(placement) {
+                    p.dashed_outline(x1 - 2.0, top - 2.0, x2 + 2.0, bottom + 2.0, REMOVED);
+                }
+            }
+        }
+
+        if let Some((drag, shelf)) = model.drag.as_ref().and_then(|drag| {
+            model
+                .scene
+                .shelves
+                .iter()
+                .find(|shelf| shelf.id == drag.shelf_id)
+                .map(|shelf| (drag, shelf))
+        }) {
+            let (left, y) = model.world_to_screen(shelf.x, drag.elevation);
+            let right = model
+                .world_to_screen(shelf.x + shelf.width, drag.elevation)
+                .0;
+            let center = (left + right) / 2.0;
+            p.rect(center - 0.75, top_y, center + 0.75, base_y, DRAG_GUIDE);
+            p.rect(right + 12.0, y - 1.0, right + 44.0, y + 1.0, DRAG_GUIDE);
+        }
+
+        p.vertices
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod webgpu {
     use super::*;
-    use bytemuck::{Pod, Zeroable};
-    use planogram_core::StockingMode;
     use wasm_bindgen::JsCast;
     use wgpu::util::DeviceExt;
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable)]
-    struct Vertex {
-        position: [f32; 2],
-        color: [f32; 4],
-    }
 
     pub struct WebGpuRenderer {
         pub model: RenderModel,
@@ -319,6 +995,9 @@ mod webgpu {
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
         pipeline: wgpu::RenderPipeline,
+        /// CSS px → device px. The model and hit testing stay in CSS px; only
+        /// the surface is allocated at device resolution so lines stay crisp.
+        pixel_ratio: f32,
     }
 
     impl WebGpuRenderer {
@@ -331,8 +1010,11 @@ mod webgpu {
                 .ok_or("canvas not found")?
                 .dyn_into::<web_sys::HtmlCanvasElement>()
                 .map_err(|_| "element is not a canvas")?;
-            let width = canvas.client_width().max(1) as u32;
-            let height = canvas.client_height().max(1) as u32;
+            let pixel_ratio = (window.device_pixel_ratio() as f32).clamp(1.0, 4.0);
+            let css_width = canvas.client_width().max(1) as f32;
+            let css_height = canvas.client_height().max(1) as f32;
+            let width = (css_width * pixel_ratio).round() as u32;
+            let height = (css_height * pixel_ratio).round() as u32;
             canvas.set_width(width);
             canvas.set_height(height);
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -423,358 +1105,24 @@ mod webgpu {
                 queue,
                 config,
                 pipeline,
+                pixel_ratio,
             };
-            renderer.model.resize(width as f32, height as f32);
+            renderer.model.resize(css_width, css_height);
             renderer.render()?;
             Ok(renderer)
         }
 
+        /// `width` and `height` are CSS px; the surface is sized in device px.
         pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-            self.config.width = width.max(1);
-            self.config.height = height.max(1);
+            self.config.width = ((width.max(1) as f32) * self.pixel_ratio).round() as u32;
+            self.config.height = ((height.max(1) as f32) * self.pixel_ratio).round() as u32;
             self.surface.configure(&self.device, &self.config);
             self.model.resize(width as f32, height as f32);
             self.render()
         }
 
-        fn rect(
-            vertices: &mut Vec<Vertex>,
-            width: f32,
-            height: f32,
-            x1: f32,
-            y1: f32,
-            x2: f32,
-            y2: f32,
-            color: [f32; 4],
-        ) {
-            let ndc = |x: f32, y: f32| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
-            let (a, b, c, d) = (ndc(x1, y1), ndc(x2, y1), ndc(x2, y2), ndc(x1, y2));
-            for p in [a, b, c, a, c, d] {
-                vertices.push(Vertex { position: p, color });
-            }
-        }
-
-        fn dashed_outline(
-            vertices: &mut Vec<Vertex>,
-            width: f32,
-            height: f32,
-            x1: f32,
-            y1: f32,
-            x2: f32,
-            y2: f32,
-            color: [f32; 4],
-        ) {
-            let dash = 7.0;
-            let gap = 5.0;
-            let mut x = x1;
-            while x < x2 {
-                let end = (x + dash).min(x2);
-                Self::rect(vertices, width, height, x, y1, end, y1 + 2.0, color);
-                Self::rect(vertices, width, height, x, y2 - 2.0, end, y2, color);
-                x += dash + gap;
-            }
-            let mut y = y1;
-            while y < y2 {
-                let end = (y + dash).min(y2);
-                Self::rect(vertices, width, height, x1, y, x1 + 2.0, end, color);
-                Self::rect(vertices, width, height, x2 - 2.0, y, x2, end, color);
-                y += dash + gap;
-            }
-        }
-
         pub fn render(&mut self) -> Result<(), String> {
-            let mut vertices = Vec::new();
-            let w = self.config.width as f32;
-            let h = self.config.height as f32;
-            let (_, base_y) = self.model.world_to_screen(Length::ZERO, Length::ZERO);
-            let (_, top_y) = self
-                .model
-                .world_to_screen(self.model.scene.width, self.model.scene.height);
-            // Each base deck identifies a physical bay. Internal uprights remain
-            // visible when the entire category is fitted into the viewport.
-            for bay in self
-                .model
-                .scene
-                .shelves
-                .iter()
-                .filter(|shelf| shelf.kind == ShelfKind::BaseDeck)
-            {
-                let bay_left = self.model.world_to_screen(bay.x, Length::ZERO).0;
-                let bay_right = self
-                    .model
-                    .world_to_screen(bay.x + bay.width, Length::ZERO)
-                    .0;
-                Self::rect(
-                    &mut vertices,
-                    w,
-                    h,
-                    bay_left,
-                    top_y,
-                    bay_right,
-                    top_y + 3.0,
-                    [0.10, 0.12, 0.14, 1.0],
-                );
-                for upright in [bay_left, bay_right] {
-                    Self::rect(
-                        &mut vertices,
-                        w,
-                        h,
-                        upright - 2.0,
-                        top_y,
-                        upright + 2.0,
-                        base_y + 4.0,
-                        [0.18, 0.20, 0.22, 1.0],
-                    );
-                }
-            }
-            for shelf in &self.model.scene.shelves {
-                let elevation = self
-                    .model
-                    .drag
-                    .as_ref()
-                    .filter(|drag| drag.shelf_id == shelf.id)
-                    .map(|drag| drag.elevation)
-                    .unwrap_or(shelf.elevation);
-                let (left, y) = self.model.world_to_screen(shelf.x, elevation);
-                let right = self
-                    .model
-                    .world_to_screen(shelf.x + shelf.width, elevation)
-                    .0;
-                let selected = matches!(
-                    &self.model.selected,
-                    Some(Selection::Shelf { id }) if id == &shelf.id
-                );
-                let color = if self.model.validation_error.is_some() && selected {
-                    [0.78, 0.16, 0.15, 1.0]
-                } else if selected {
-                    [0.08, 0.35, 0.92, 1.0]
-                } else if shelf.kind == ShelfKind::BaseDeck {
-                    [0.12, 0.14, 0.16, 1.0]
-                } else {
-                    [0.28, 0.30, 0.32, 1.0]
-                };
-                let thickness = if shelf.kind == ShelfKind::BaseDeck {
-                    9.0
-                } else if selected {
-                    6.0
-                } else {
-                    4.0
-                };
-                Self::rect(
-                    &mut vertices,
-                    w,
-                    h,
-                    left,
-                    y - thickness / 2.0,
-                    right,
-                    y + thickness / 2.0,
-                    color,
-                );
-            }
-            for placement in &self.model.scene.placements {
-                let Some(shelf) = self
-                    .model
-                    .scene
-                    .shelves
-                    .iter()
-                    .find(|shelf| shelf.id == placement.shelf_id)
-                else {
-                    continue;
-                };
-                let (x1, shelf_y) = self
-                    .model
-                    .world_to_screen(shelf.x + placement.x, shelf.elevation);
-                let (x2, product_top) = self.model.world_to_screen(
-                    shelf.x + placement.x + placement.width,
-                    shelf.elevation + placement.height,
-                );
-                if matches!(
-                    &self.model.selected,
-                    Some(Selection::Placement { id }) if id == &placement.id
-                ) {
-                    Self::rect(
-                        &mut vertices,
-                        w,
-                        h,
-                        x1 - 3.0,
-                        product_top - 3.0,
-                        x2 + 3.0,
-                        shelf_y + 3.0,
-                        [0.08, 0.35, 0.92, 1.0],
-                    );
-                }
-                Self::rect(
-                    &mut vertices,
-                    w,
-                    h,
-                    x1,
-                    product_top,
-                    x2,
-                    shelf_y,
-                    [
-                        placement.color[0] as f32 / 255.0,
-                        placement.color[1] as f32 / 255.0,
-                        placement.color[2] as f32 / 255.0,
-                        1.0,
-                    ],
-                );
-                if placement.stocking_mode == StockingMode::Tray {
-                    let tray_treatment = [0.08, 0.09, 0.10, 0.48];
-                    if placement.facings_x > 1 {
-                        for facing in 1..placement.facings_x {
-                            let separator_x =
-                                x1 + (x2 - x1) * facing as f32 / placement.facings_x as f32;
-                            Self::rect(
-                                &mut vertices,
-                                w,
-                                h,
-                                separator_x - 0.75,
-                                product_top + 1.0,
-                                separator_x + 0.75,
-                                shelf_y - 1.0,
-                                tray_treatment,
-                            );
-                        }
-                    }
-                    if let Some(front_lip_height) = placement.tray_front_lip_height {
-                        let (_, lip_top) = self.model.world_to_screen(
-                            shelf.x + placement.x,
-                            shelf.elevation + front_lip_height,
-                        );
-                        Self::rect(
-                            &mut vertices,
-                            w,
-                            h,
-                            x1,
-                            lip_top.max(product_top),
-                            x2,
-                            shelf_y,
-                            tray_treatment,
-                        );
-                        Self::rect(
-                            &mut vertices,
-                            w,
-                            h,
-                            x1,
-                            lip_top.max(product_top),
-                            x2,
-                            lip_top.max(product_top) + 1.5,
-                            [0.96, 0.97, 0.98, 0.62],
-                        );
-                    }
-                }
-            }
-            if let Some(proposal_scene) = &self.model.proposal_scene {
-                let proposal_color = [0.93, 0.55, 0.08, 0.92];
-                for placement in proposal_scene
-                    .placements
-                    .iter()
-                    .filter(|placement| self.model.proposal_affected_ids.contains(&placement.id.0))
-                {
-                    let Some(shelf) = proposal_scene
-                        .shelves
-                        .iter()
-                        .find(|shelf| shelf.id == placement.shelf_id)
-                    else {
-                        continue;
-                    };
-                    let (x1, shelf_y) = self
-                        .model
-                        .world_to_screen(shelf.x + placement.x, shelf.elevation);
-                    let (x2, product_top) = self.model.world_to_screen(
-                        shelf.x + placement.x + placement.width,
-                        shelf.elevation + placement.height,
-                    );
-                    Self::rect(
-                        &mut vertices,
-                        w,
-                        h,
-                        x1 + 2.0,
-                        product_top + 2.0,
-                        x2 - 2.0,
-                        shelf_y - 2.0,
-                        [0.95, 0.63, 0.16, 0.24],
-                    );
-                    Self::dashed_outline(
-                        &mut vertices,
-                        w,
-                        h,
-                        x1 - 2.0,
-                        product_top - 2.0,
-                        x2 + 2.0,
-                        shelf_y + 2.0,
-                        proposal_color,
-                    );
-                }
-                for placement in self.model.scene.placements.iter().filter(|placement| {
-                    self.model.proposal_affected_ids.contains(&placement.id.0)
-                        && !proposal_scene
-                            .placements
-                            .iter()
-                            .any(|candidate| candidate.id == placement.id)
-                }) {
-                    let Some(shelf) = self
-                        .model
-                        .scene
-                        .shelves
-                        .iter()
-                        .find(|shelf| shelf.id == placement.shelf_id)
-                    else {
-                        continue;
-                    };
-                    let (x1, shelf_y) = self
-                        .model
-                        .world_to_screen(shelf.x + placement.x, shelf.elevation);
-                    let (x2, product_top) = self.model.world_to_screen(
-                        shelf.x + placement.x + placement.width,
-                        shelf.elevation + placement.height,
-                    );
-                    Self::dashed_outline(
-                        &mut vertices,
-                        w,
-                        h,
-                        x1 - 2.0,
-                        product_top - 2.0,
-                        x2 + 2.0,
-                        shelf_y + 2.0,
-                        [0.78, 0.20, 0.16, 0.9],
-                    );
-                }
-            }
-            if let Some((drag, shelf)) = self.model.drag.as_ref().and_then(|drag| {
-                self.model
-                    .scene
-                    .shelves
-                    .iter()
-                    .find(|shelf| shelf.id == drag.shelf_id)
-                    .map(|shelf| (drag, shelf))
-            }) {
-                let (left, y) = self.model.world_to_screen(shelf.x, drag.elevation);
-                let right = self
-                    .model
-                    .world_to_screen(shelf.x + shelf.width, drag.elevation)
-                    .0;
-                Self::rect(
-                    &mut vertices,
-                    w,
-                    h,
-                    (left + right) / 2.0 - 0.75,
-                    top_y,
-                    (left + right) / 2.0 + 0.75,
-                    base_y,
-                    [0.94, 0.58, 0.08, 0.9],
-                );
-                Self::rect(
-                    &mut vertices,
-                    w,
-                    h,
-                    right + 12.0,
-                    y - 1.0,
-                    right + 44.0,
-                    y + 1.0,
-                    [0.94, 0.58, 0.08, 0.9],
-                );
-            }
+            let vertices = scene_vertices(&self.model);
             let vertex_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1151,5 +1499,95 @@ mod tests {
         });
         assert!(renderer.scene.placements.is_empty());
         assert_eq!(renderer.selected, None);
+    }
+
+    #[test]
+    fn shelf_line_wins_over_products_resting_on_it() {
+        let mut draft = DraftVersion::default();
+        let result = draft.add_placement(
+            &draft.id.clone(),
+            &ProductId::new("jif_creamy_16"),
+            &ShelfId::new("shelf_01"),
+            0,
+            "test add",
+        );
+        assert!(matches!(result, CommandResult::Applied { .. }));
+        let mut renderer = RenderModel::new(draft.render_scene());
+        renderer.resize(1_000.0, 800.0);
+        let placement = renderer.scene.placements[0].clone();
+        let shelf = renderer
+            .scene
+            .shelves
+            .iter()
+            .find(|shelf| shelf.id == placement.shelf_id)
+            .unwrap();
+        let (left, shelf_y) = renderer.world_to_screen(shelf.x + placement.x, shelf.elevation);
+        let (right, top) = renderer.world_to_screen(
+            shelf.x + placement.x + placement.width,
+            shelf.elevation + placement.height,
+        );
+        let x = (left + right) / 2.0;
+        assert_eq!(
+            renderer.hit_test(x, shelf_y - 2.0),
+            Some(HitTarget::Shelf {
+                id: shelf.id.clone()
+            })
+        );
+        assert_eq!(
+            renderer.hit_test(x, shelf_y - SHELF_GRAB_PRIORITY - 4.0),
+            Some(HitTarget::Placement {
+                id: placement.id.clone(),
+                shelf_id: placement.shelf_id.clone(),
+            })
+        );
+        assert!(top < shelf_y - SHELF_GRAB_PRIORITY - 4.0);
+    }
+
+    #[test]
+    fn labels_follow_the_camera_and_respect_minimum_size() {
+        let mut draft = DraftVersion::default();
+        let result = draft.add_placement(
+            &draft.id.clone(),
+            &ProductId::new("jif_creamy_16"),
+            &ShelfId::new("shelf_01"),
+            0,
+            "test add",
+        );
+        assert!(matches!(result, CommandResult::Applied { .. }));
+        let mut renderer = RenderModel::new(draft.render_scene());
+        renderer.resize(1_000.0, 800.0);
+        let labels = renderer.placement_labels(0.0, 0.0);
+        assert_eq!(labels.len(), 1);
+        let placement = &renderer.scene.placements[0];
+        let (x1, top, x2, bottom) = renderer.placement_rect(placement).unwrap();
+        assert_eq!(labels[0].id, placement.id);
+        assert_eq!(labels[0].product_id, placement.product_id);
+        assert!((labels[0].x - x1).abs() < 0.01 && (labels[0].y - top).abs() < 0.01);
+        assert!((labels[0].width - (x2 - x1)).abs() < 0.01);
+        assert!((labels[0].height - (bottom - top)).abs() < 0.01);
+        assert!(renderer.placement_labels(10_000.0, 0.0).is_empty());
+        renderer.pan_by(-5_000.0, 0.0);
+        assert!(renderer.placement_labels(0.0, 0.0).is_empty());
+        let scene_before = renderer.scene.clone();
+        renderer.zoom_by(3.0);
+        let zoomed = renderer.placement_labels(0.0, 0.0);
+        assert!(zoomed.is_empty() || zoomed[0].width > labels[0].width);
+        assert_eq!(renderer.scene, scene_before);
+    }
+
+    #[test]
+    fn sku_colors_are_deterministic_and_vary_within_a_brand() {
+        let a = paint::sku_color([207, 31, 38], "jif_creamy_16");
+        let again = paint::sku_color([207, 31, 38], "jif_creamy_16");
+        let sibling = paint::sku_color([207, 31, 38], "jif_crunchy_16");
+        assert_eq!(a, again);
+        assert_ne!(a, sibling);
+        for channel in a.iter().chain(sibling.iter()) {
+            assert!((0.0..=1.0).contains(channel));
+        }
+        let draft = DraftVersion::default();
+        let mut renderer = RenderModel::new(draft.render_scene());
+        renderer.resize(1_000.0, 800.0);
+        assert!(!scene_vertices(&renderer).is_empty());
     }
 }

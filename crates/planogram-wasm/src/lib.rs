@@ -692,6 +692,18 @@ impl PlanogramEngine {
         )
     }
 
+    /// Screen rectangles (CSS px) of placements at least `min_width` by
+    /// `min_height` on screen, for the HTML label overlay.
+    pub fn placement_labels(&self, min_width: f32, min_height: f32) -> Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.model.placement_labels(min_width, min_height))
+                .unwrap_or_default(),
+        )
+    }
+
     pub fn select_shelf(&mut self, shelf_id: String) {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.model.select(Some(Selection::Shelf {

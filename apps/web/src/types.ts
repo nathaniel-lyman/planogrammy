@@ -107,8 +107,21 @@ export interface PlacementSceneNode {
   facings_y: number;
   facings_z: number;
   tray_front_lip_height?: number | null;
+  package_shape: PackageShape;
   color: [number, number, number];
   lid_color: [number, number, number];
+}
+
+export type PackageShape = 'jar' | 'box';
+
+/** Screen rectangle (CSS px) of one placement, derived by the renderer for the label overlay. */
+export interface PlacementLabel {
+  id: string;
+  product_id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface RenderScene {
@@ -246,6 +259,7 @@ export interface WasmEngine {
   undo_change_set_as(versionId: string, changeSetId: string, expectedRevision: number, actor: string): CommandResult;
   resize(width: number, height: number): void;
   hit_test(x: number, y: number): HitTarget | undefined;
+  placement_labels(minWidth: number, minHeight: number): PlacementLabel[];
   select_shelf(shelfId: string): void;
   select_placement(placementId: string): void;
   clear_selection(): void;

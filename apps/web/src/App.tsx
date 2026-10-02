@@ -9,10 +9,23 @@ import { searchProducts } from './queries';
 import { PlanogramSession, type ProposalApprovalSource, type SessionProposal } from './session';
 import { useUiStore } from './store';
 import { registerPlanogramWebMcp } from './webmcp';
-import type { ChangeSet, CommandResult, FacingsRequest, Placement, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
+import type { ChangeSet, CommandResult, FacingsRequest, Placement, PlacementLabel, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
 
 const CANVAS_ID = 'planogram-canvas';
 const SHELF_READY_TRAY_LABEL = 'Shelf-ready tray';
+/** Smallest on-screen placement (CSS px) that still gets a readable text label. */
+const LABEL_MIN_WIDTH = 60;
+const LABEL_MIN_HEIGHT = 64;
+
+/** Catalog descriptions may already carry the brand (the cereal generator does); never show it twice. */
+function productTitle(product: Product) {
+  return product.description.startsWith(`${product.brand} `) ? product.description : `${product.brand} ${product.description}`;
+}
+
+/** Description without the brand prefix, for the compact canvas label. */
+function productVariant(product: Product) {
+  return product.description.startsWith(`${product.brand} `) ? product.description.slice(product.brand.length + 1) : product.description;
+}
 
 function allShelves(context: NonNullable<ReturnType<typeof useUiStore.getState>['context']>): Shelf[] {
   return context.fixture.sections.flatMap(section => section.shelves);
@@ -22,7 +35,7 @@ function statusError(result: CommandResult): string | undefined { return result.
 
 function productTooltip(product: Product) {
   const stocking = product.tray ? `${SHELF_READY_TRAY_LABEL}, ${product.tray.facings_x} facings × ${product.tray.units_deep} deep` : 'Loose stocked';
-  return `${product.brand} ${product.description} · ${product.size_oz} · ${formatImperial(product.dimensions.width)} W × ${formatImperial(product.dimensions.height)} H × ${formatImperial(product.dimensions.depth)} D · ${stocking}`;
+  return `${productTitle(product)} · ${product.size_oz} · ${formatImperial(product.dimensions.width)} W × ${formatImperial(product.dimensions.height)} H × ${formatImperial(product.dimensions.depth)} D · ${stocking}`;
 }
 
 const compactNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
@@ -64,7 +77,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function proposalProductName(productId: unknown, products: Product[], fallback = 'Product') {
   if (typeof productId !== 'string') return fallback;
   const product = products.find(candidate => candidate.id === productId);
-  return product ? `${product.brand} ${product.description} (${product.size_oz})` : productId;
+  return product ? `${productTitle(product)} (${product.size_oz})` : productId;
 }
 
 function shelfLabel(shelfId: unknown) {
@@ -256,6 +269,8 @@ export function App() {
   const [placementControl, setPlacementControl] = useState<'position' | 'facings'>('position');
   const [shelfDistribution, setShelfDistribution] = useState<ShelfDistribution>('space_evenly');
   const [zoomLabel, setZoomLabel] = useState(100);
+  const [labels, setLabels] = useState<PlacementLabel[]>([]);
+  const [interacting, setInteracting] = useState(false);
   const [productQuery, setProductQuery] = useState('');
   const [brandFilter, setBrandFilter] = useState('All brands');
   const [stockingFilter, setStockingFilter] = useState<'all' | StockingMode>('all');
@@ -422,6 +437,15 @@ export function App() {
     keyboardMove(event);
   }, [issueFacings, issuePlacementMove, issueRemoval, keyboardMove, selectedPlacement?.id]);
 
+  // Labels are an HTML annotation over the renderer-owned camera. They refresh
+  // after discrete events only (commands, zoom steps, pointer release, resize),
+  // never per pointer-move pixel.
+  const refreshLabels = useCallback(() => {
+    const engine = sessionRef.current?.engine;
+    setLabels(engine ? engine.placement_labels(LABEL_MIN_WIDTH, LABEL_MIN_HEIGHT) : []);
+  }, []);
+  useEffect(() => { refreshLabels(); }, [context, refreshLabels]);
+
   useEffect(() => {
     let cancelled = false;
     let observer: ResizeObserver | undefined;
@@ -460,6 +484,7 @@ export function App() {
         observer = new ResizeObserver(entries => {
           const rect = entries[0].contentRect;
           engine.resize(Math.round(rect.width), Math.round(rect.height));
+          refreshLabels();
         });
         observer.observe(canvas);
       } catch (cause) {
@@ -519,10 +544,11 @@ export function App() {
       selectTarget({ kind: 'placement', id: hit.id });
     } else if (hit?.kind === 'shelf') {
       selectTarget({ kind: 'shelf', id: hit.id });
-      if (engine.begin_drag(hit.id, point.y)) interactionRef.current = { kind: 'drag', pointerId: event.pointerId, ...point };
+      if (engine.begin_drag(hit.id, point.y)) { interactionRef.current = { kind: 'drag', pointerId: event.pointerId, ...point }; setInteracting(true); }
     } else {
       selectTarget(undefined);
       interactionRef.current = { kind: 'pan', pointerId: event.pointerId, ...point };
+      setInteracting(true);
     }
   };
 
@@ -539,6 +565,8 @@ export function App() {
     const interaction = interactionRef.current;
     const engine = sessionRef.current?.engine;
     interactionRef.current = undefined;
+    setInteracting(false);
+    refreshLabels();
     if (!interaction || !engine || interaction.pointerId !== event.pointerId) return;
     if (interaction.kind === 'drag') {
       const completed = engine.finish_drag();
@@ -548,14 +576,26 @@ export function App() {
     }
   };
 
-  const cancelPointer = () => { interactionRef.current = undefined; sessionRef.current?.engine.cancel_drag(); };
+  const cancelPointer = () => { interactionRef.current = undefined; sessionRef.current?.engine.cancel_drag(); setInteracting(false); refreshLabels(); };
 
   const changeZoom = (factor: number) => {
     sessionRef.current?.engine.zoom_by(factor);
     setZoomLabel(value => Math.max(35, Math.min(500, Math.round(value * factor))));
+    refreshLabels();
   };
+  const changeZoomRef = useRef(changeZoom);
+  changeZoomRef.current = changeZoom;
+  // React registers onWheel passively, which cannot block page scroll; attach
+  // a non-passive listener so wheel zoom stays on the canvas.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (event: WheelEvent) => { event.preventDefault(); changeZoomRef.current(event.deltaY < 0 ? 1.08 : 0.92); };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, [unsupported]);
 
-  const fitFixture = () => { sessionRef.current?.engine.fit_fixture(); setZoomLabel(100); };
+  const fitFixture = () => { sessionRef.current?.engine.fit_fixture(); setZoomLabel(100); refreshLabels(); };
 
   const undo = () => {
     const session = sessionRef.current;
@@ -716,7 +756,7 @@ export function App() {
             >
               <ProductSwatch product={product}/>
               <span className="product-copy">
-                <strong>{product.brand} {product.description}</strong>
+                <strong>{productTitle(product)}</strong>
                 <small>{product.size_oz} · {formatImperial(product.dimensions.width)} W × {formatImperial(product.dimensions.height)} H × {formatImperial(product.dimensions.depth)} D</small>
                 <span className="catalog-metrics" aria-label={`${formatSalesPerStoreWeek(product)} sales per store per week, ${formatUnitsPerStoreWeek(product)} units per store per week, ${formatGrossMargin(product)} gross margin`}><span>{formatSalesPerStoreWeek(product)} SSW</span><span>{formatUnitsPerStoreWeek(product)} USW</span><span>{formatGrossMargin(product)} GM</span></span>
                 <small className="catalog-logistics">{formatNetWeight(product)} net · Casepack {product.casepack_quantity}{product.tray ? ` · Tray ${product.tray.facings_x}×${product.tray.units_deep}` : ' · Loose'}</small>
@@ -730,7 +770,7 @@ export function App() {
           <div className="catalog-action"><button onClick={() => selectedProduct && issuePlacement(selectedProduct.id, targetShelfId, 'catalog_button')} disabled={!selectedProduct || !canAddToTargetShelf}><PackagePlus size={16}/><span>{selectedProduct?.tray ? 'Add tray to selected shelf' : 'Add to selected shelf'}<small>{selectedProduct ? selectedProduct.tray ? `${SHELF_READY_TRAY_LABEL} · ${selectedProduct.tray.facings_x} facings × ${selectedProduct.tray.units_deep} deep` : `${selectedProduct.brand} ${selectedProduct.size_oz} · loose` : 'Choose a product'}</small></span></button><p>Double-click or drag a product onto a shelf. Tray presets resolve in Rust.</p></div>
         </aside>
         <div className="canvas-region">
-          <div className="canvas-heading"><div><span>Front elevation</span><strong>{context?.scenario?'Cereal category':'Section 01'}</strong></div>{context?.scenario && <select aria-label="Focus bay" value={activeBay} onChange={e=>{const id=e.target.value;setActiveBay(id);if(id){const shelf=context.fixture.sections.find(s=>s.id===id)?.shelves[0];if(shelf)sessionRef.current?.engine.focus_bay(shelf.id);}else fitFixture();}}><option value="">All bays</option>{context.fixture.sections.map((section,i)=><option key={section.id} value={section.id}>Bay {String(i+1).padStart(2,'0')}</option>)}</select>}<div className="dimensions">{context && `${formatImperial(context.fixture.width)} W × ${formatImperial(context.fixture.height)} H`}</div></div>
+          <div className="canvas-heading"><div><span>Front elevation</span><strong>{context?.scenario?'Cereal category':'Section 01'}</strong></div>{context?.scenario && <select aria-label="Focus bay" value={activeBay} onChange={e=>{const id=e.target.value;setActiveBay(id);if(id){const shelf=context.fixture.sections.find(s=>s.id===id)?.shelves[0];if(shelf){sessionRef.current?.engine.focus_bay(shelf.id);refreshLabels();}}else fitFixture();}}><option value="">All bays</option>{context.fixture.sections.map((section,i)=><option key={section.id} value={section.id}>Bay {String(i+1).padStart(2,'0')}</option>)}</select>}<div className="dimensions">{context && `${formatImperial(context.fixture.width)} W × ${formatImperial(context.fixture.height)} H`}</div></div>
           <canvas
             ref={canvasRef}
             id={CANVAS_ID}
@@ -742,10 +782,16 @@ export function App() {
             onPointerUp={pointerUp}
             onPointerCancel={cancelPointer}
             onLostPointerCapture={cancelPointer}
-            onWheel={event => { event.preventDefault(); changeZoom(event.deltaY < 0 ? 1.08 : 0.92); }}
             onDragOver={event => { if (event.dataTransfer.types.includes('application/x-planogram-product')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
             onDrop={event => { event.preventDefault(); const productId = event.dataTransfer.getData('application/x-planogram-product'); const point = pointerPosition(event); const hit = sessionRef.current?.engine.hit_test(point.x, point.y); const shelfId = hit?.kind === 'shelf' ? hit.id : hit?.shelf_id; if (productId) { if (shelfId) selectTarget({ kind: 'shelf', id: shelfId }); issuePlacement(productId, shelfId, 'catalog_drag'); } }}
           />
+          <div className={interacting ? 'placement-labels interacting' : 'placement-labels'} aria-hidden="true">
+            {labels.map(label => {
+              const product = products.find(candidate => candidate.id === label.product_id);
+              if (!product) return null;
+              return <div key={label.id} className="placement-label" style={{ left: label.x, top: label.y, maxWidth: label.width }}><strong>{product.brand}</strong><span>{productVariant(product)} · {product.size_oz}</span></div>;
+            })}
+          </div>
           {!proposal && <div className="canvas-help">Select products or shelves · Arrows move selected products 1/8" · + / − change facings · Drag shelves at 1" · Scroll to zoom</div>}
           {proposal && <div className="proposal-legend" aria-label="Proposal preview legend"><span><Package size={13}/>Current placement</span><span><PackagePlus size={13}/>Proposed position</span></div>}
         </div>
@@ -779,7 +825,7 @@ export function App() {
                 {distributionError && <p id="distribution-error" className="error" role="alert">{distributionError}</p>}
               </form>
             </> : selectedPlacement && selectedPlacementProduct ? <>
-              <h1>{selectedPlacementProduct.brand} {selectedPlacementProduct.description}</h1>
+              <h1>{productTitle(selectedPlacementProduct)}</h1>
               <span className={`stocking-badge ${selectedPlacement.stocking_mode}`}>{selectedPlacement.stocking_mode === 'tray' ? SHELF_READY_TRAY_LABEL : 'Loose stocked'}</span>
               {salesAllocationControls}
               <h2 className="inspector-subheading">Placement</h2>
@@ -853,7 +899,7 @@ export function App() {
             <div className="companion-heading"><div><span className="section-label">Accessible companion</span><h2 id="companion-heading">Fixture outline</h2></div><span>{shelves.length} levels</span></div>
             <p className="sr-only">Fixture width {context && formatImperial(context.fixture.width)} and height {context && formatImperial(context.fixture.height)}. Current revision {context?.revision ?? 0}. Placement entries identify loose or tray stocking, resolved facings, stocked units, and loaded footprint. Keyboard commands: arrow keys move a selected adjustable shelf one inch or move a selected placement left and right in 1/8-inch increments. Placement shelf and position can be changed together in the inspector. Plus and minus keys add or remove one horizontal facing of a selected loose placement, and the inspector sets wide, high, and deep facings; adding, removing or resizing a product re-spaces its shelf so neighboring units of the same product stay tightly packed and the product blocks are spaced evenly, and loaded trays keep their preset facings. Selected shelves can pack, center, space between, or space product blocks evenly while keeping a 1/8-inch minimum gap. Delete or Backspace removes a selected product placement. The base deck is fixed.</p>
             <ol className="shelf-list">
-              {shelves.filter(shelf=>!activeBay||shelf.section_id===activeBay).map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelfLabel(shelf.id)}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = `${product?.brand ?? 'Product'} ${product?.description ?? placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
+              {shelves.filter(shelf=>!activeBay||shelf.section_id===activeBay).map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelfLabel(shelf.id)}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = product ? productTitle(product) : `Product ${placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
             </ol>
           </section>
         </aside>}
