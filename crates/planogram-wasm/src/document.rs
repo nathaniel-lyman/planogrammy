@@ -174,6 +174,177 @@ impl EditorDocument {
 mod tests {
     use super::*;
     use crate::bay_file::{export_document, parse_document};
+    use planogram_core::{
+        CommandResult, PreviewResult, ProductId, SalesAllocationBasis, SalesAllocationRequest,
+        SalesAllocationScope, SalesAllocationTarget, ShelfId,
+    };
+
+    fn allocation_round_trip(mut document: EditorDocument, request: SalesAllocationRequest) {
+        let before = document.clone();
+        let version = document.draft().id.clone();
+        let revision = document.draft().revision;
+        let before_json = export_document(&document, "Synthetic allocation").unwrap();
+        let preview = document
+            .draft()
+            .preview_sales_allocation(&version, &request, revision);
+        let PreviewResult::Ready {
+            operations,
+            sales_allocation: Some(report),
+            preview_scene,
+            ..
+        } = preview
+        else {
+            panic!("allocation preview must be ready: {preview:?}");
+        };
+        assert!(!report.rows.is_empty());
+        assert!(report.source.to_ascii_lowercase().contains("synthetic"));
+        assert!(!report.period.is_empty());
+        // Saving a preview serializes exactly the pre-preview committed document.
+        assert_eq!(document, before);
+        assert_eq!(
+            export_document(&document, "Synthetic allocation").unwrap(),
+            before_json
+        );
+        let result = document.draft_mut().apply_sales_allocation_as(
+            &version,
+            &request,
+            revision,
+            "human",
+            "Review synthetic sales allocation",
+        );
+        let CommandResult::Applied { change_set, .. } = result else {
+            panic!("allocation apply must succeed: {result:?}");
+        };
+        assert_eq!(change_set.operations, operations);
+        assert_eq!(change_set.actor, "human");
+        assert_eq!(document.draft().revision, revision + 1);
+        assert_eq!(
+            document.draft().render_scene().placements,
+            preview_scene.placements
+        );
+        assert_eq!(document.draft().products, before.draft().products);
+        if let (Some(before_view), Some(after_view)) = (before.view(), document.view()) {
+            assert_eq!(
+                before_view.comparison.current.weekly_demand_milliunits,
+                after_view.comparison.current.weekly_demand_milliunits
+            );
+            assert_eq!(
+                before_view
+                    .comparison
+                    .current
+                    .stocked_weekly_demand_milliunits,
+                after_view
+                    .comparison
+                    .current
+                    .stocked_weekly_demand_milliunits
+            );
+            assert_eq!(
+                before_view.comparison.baseline,
+                after_view.comparison.baseline
+            );
+        }
+        let saved = export_document(&document, "Synthetic allocation").unwrap();
+        let (_, mut opened) = parse_document(&saved).unwrap();
+        assert_eq!(opened, document);
+        assert!(matches!(
+            opened
+                .draft_mut()
+                .undo_change_set(&version, &change_set.id, revision + 1),
+            CommandResult::Applied { .. }
+        ));
+        assert_eq!(opened.draft().revision, revision + 2);
+        assert_eq!(opened.draft().placements, before.draft().placements);
+        assert_eq!(opened.draft().products, before.draft().products);
+        assert_eq!(
+            parse_document(&export_document(&opened, "Undo allocation").unwrap())
+                .unwrap()
+                .1,
+            opened
+        );
+    }
+
+    #[test]
+    fn standard_sales_allocation_preview_commit_save_open_and_undo() {
+        let mut draft = DraftVersion::default();
+        let version = draft.id.clone();
+        for product in ["jif_creamy_16", "jif_crunchy_16", "skippy_creamy_40"] {
+            let revision = draft.revision;
+            assert!(matches!(
+                draft.add_placement(
+                    &version,
+                    &ProductId::new(product),
+                    &ShelfId::new("shelf_01"),
+                    revision,
+                    "Synthetic demo assortment"
+                ),
+                CommandResult::Applied { .. }
+            ));
+        }
+        allocation_round_trip(
+            EditorDocument::Bay { draft },
+            SalesAllocationRequest {
+                scope: SalesAllocationScope::Shelf {
+                    shelf_id: ShelfId::new("shelf_01"),
+                },
+                basis: SalesAllocationBasis::Revenue,
+                target: SalesAllocationTarget::Space,
+                min_facings: 1,
+                max_facings: 24,
+            },
+        );
+    }
+
+    #[test]
+    fn cereal_sales_allocation_round_trip_preserves_baseline_and_assumed_demand() {
+        let document = EditorDocument::cereal(20260930).unwrap();
+        let section_id = document.draft().fixture.sections[0].id.clone();
+        allocation_round_trip(
+            document,
+            SalesAllocationRequest {
+                scope: SalesAllocationScope::Bay { section_id },
+                basis: SalesAllocationBasis::Units,
+                target: SalesAllocationTarget::Facings,
+                min_facings: 1,
+                max_facings: 24,
+            },
+        );
+    }
+
+    #[test]
+    fn sales_request_transport_rejects_unknown_and_malformed_nested_fields() {
+        let request = serde_json::json!({
+            "scope": { "kind": "shelf", "shelf_id": "shelf_01" },
+            "basis": "revenue", "target": "space", "min_facings": 1, "max_facings": 24
+        });
+        assert!(serde_json::from_value::<SalesAllocationRequest>(request.clone()).is_ok());
+        for (key, value) in [
+            (
+                "scope",
+                serde_json::json!({ "kind": "shelf", "shelf_id": "shelf_01", "x_sixteenths": 0 }),
+            ),
+            (
+                "scope",
+                serde_json::json!({ "kind": "bay", "section_id": "section_01", "shelf_id": "shelf_01" }),
+            ),
+            (
+                "scope",
+                serde_json::json!({ "kind": "shelf", "shelf_id": { "nested": true } }),
+            ),
+            ("basis", serde_json::json!("profit")),
+            ("target", serde_json::json!("uplift")),
+            ("max_facings", serde_json::json!(-1)),
+            ("min_facings", serde_json::json!(1.5)),
+            ("coordinates", serde_json::json!([0])),
+        ] {
+            let mut invalid = request.clone();
+            invalid[key] = value;
+            assert!(
+                serde_json::from_value::<SalesAllocationRequest>(invalid).is_err(),
+                "{key}"
+            );
+        }
+    }
+
     #[test]
     fn scenario_round_trip_preserves_alternatives_baseline_and_history() {
         let mut doc = EditorDocument::cereal(20260930).unwrap();

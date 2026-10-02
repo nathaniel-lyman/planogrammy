@@ -1,5 +1,7 @@
+mod sales_allocation;
 mod scenario;
 mod snapshot;
+pub use sales_allocation::*;
 pub use scenario::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -583,6 +585,8 @@ pub enum PreviewResult {
         affected_ids: Vec<String>,
         validation: ValidationSummary,
         preview_scene: Box<RenderScene>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sales_allocation: Option<Box<SalesAllocationReport>>,
     },
     ValidationFailed {
         revision: u64,
@@ -2145,6 +2149,7 @@ impl DraftVersion {
                     affected_ids: prepared.affected_ids,
                     validation: ValidationSummary::default(),
                     preview_scene,
+                    sales_allocation: None,
                 }
             }
             Err(CommandResult::ValidationFailed { validation, .. }) => {

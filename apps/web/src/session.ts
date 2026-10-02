@@ -14,7 +14,7 @@ import {
   type RemovalSource,
   type UndoSource,
 } from './commands';
-import type { CommandResult, EngineContext, Placement, PlacementChange, PlanogramValidationResult, PreviewResult, Selection, Shelf, ShelfAllocationStrategy, ShelfDistribution, WasmEngine } from './types';
+import type { CommandResult, EngineContext, Placement, PlacementChange, PlanogramValidationResult, PreviewResult, SalesAllocationReport, SalesAllocationRequest, Selection, Shelf, ShelfAllocationStrategy, ShelfDistribution, WasmEngine } from './types';
 
 export type SessionSource = MoveSource | AddPlacementSource | DistributionSource | FacingsSource | RemovalSource | UndoSource;
 export type ProposalApprovalSource = 'human' | 'webmcp';
@@ -26,6 +26,7 @@ export interface SessionProposal {
   operationCount: number;
   summary: string;
   operations: unknown[];
+  salesAllocation?: SalesAllocationReport;
   impact: {
     shelves: Array<{ shelfId: string; beforePercent: number; afterPercent: number }>;
     minimumGapSixteenths: number;
@@ -47,10 +48,12 @@ type ActiveProposal = {
   id: string;
   versionId: string;
   baseRevision: number;
+  documentRevision: number;
   reason: string;
 } & (
   | { kind: 'placement_changes'; operations: PlacementChange[] }
   | { kind: 'shelf_allocation'; shelfId: string; strategy: ShelfAllocationStrategy }
+  | { kind: 'sales_allocation'; request: SalesAllocationRequest }
 );
 
 /**
@@ -156,7 +159,7 @@ export class PlanogramSession {
     if (result.status !== 'ready') return result;
     const proposalId = `proposal_${String(this.nextProposal++).padStart(4, '0')}`;
     const reason = input.reason?.trim() || 'WebMCP placement proposal';
-    this.activeProposal = { id: proposalId, versionId: input.versionId, baseRevision: result.revision, operations: input.operations, reason, kind: 'placement_changes' };
+    this.activeProposal = { id: proposalId, versionId: input.versionId, baseRevision: result.revision, documentRevision: this.documentRevision(), operations: input.operations.map(operation => ({ ...operation })), reason, kind: 'placement_changes' };
     const summary = proposalSummary(result.operations);
     const impact = proposalImpact(this.context(), result);
     this.observers.onProposal?.({ id: proposalId, revision: result.revision, reason, operationCount: result.operations.length, summary, operations: result.operations, impact });
@@ -173,6 +176,7 @@ export class PlanogramSession {
       id: proposalId,
       versionId: input.versionId,
       baseRevision: result.revision,
+      documentRevision: this.documentRevision(),
       reason,
       kind: 'shelf_allocation',
       shelfId: input.shelfId,
@@ -181,6 +185,35 @@ export class PlanogramSession {
     const summary = proposalSummary(result.operations);
     const impact = proposalImpact(this.context(), result);
     this.observers.onProposal?.({ id: proposalId, revision: result.revision, reason, operationCount: result.operations.length, summary, operations: result.operations, impact });
+    return { ...result, proposal_id: proposalId, reason };
+  }
+
+  previewSalesAllocation(input: { versionId: string; request: SalesAllocationRequest; expectedRevision: number; reason?: string }): SessionPreviewResult {
+    this.clearActiveProposal();
+    const request: SalesAllocationRequest = { ...input.request, scope: { ...input.request.scope } };
+    const result = this.engine.preview_sales_allocation(input.versionId, request, input.expectedRevision);
+    if (result.status !== 'ready') return result;
+    const proposalId = `proposal_${String(this.nextProposal++).padStart(4, '0')}`;
+    const reason = input.reason?.trim() || 'Sales contribution allocation';
+    this.activeProposal = {
+      id: proposalId,
+      versionId: input.versionId,
+      baseRevision: result.revision,
+      documentRevision: this.documentRevision(),
+      reason,
+      kind: 'sales_allocation',
+      request,
+    };
+    this.observers.onProposal?.({
+      id: proposalId,
+      revision: result.revision,
+      reason,
+      operationCount: result.operations.length,
+      summary: proposalSummary(result.operations),
+      operations: result.operations,
+      impact: proposalImpact(this.context(), result),
+      salesAllocation: result.sales_allocation,
+    });
     return { ...result, proposal_id: proposalId, reason };
   }
 
@@ -195,22 +228,29 @@ export class PlanogramSession {
     if (input.expectedRevision !== proposal.baseRevision) {
       return { status: 'revision_conflict', expected_revision: input.expectedRevision, current_revision: this.context().revision };
     }
-    const result = this.run(source, () => proposal.kind === 'placement_changes'
-      ? this.engine.apply_changes_as(
-        input.versionId,
-        input.expectedRevision,
-        proposal.operations,
-        source,
-        proposal.reason,
-      )
-      : this.engine.apply_shelf_allocation_as(
-        input.versionId,
-        proposal.shelfId,
-        proposal.strategy,
-        input.expectedRevision,
-        source,
-        proposal.reason,
-      ));
+    const context = this.context();
+    if (context.version_id !== proposal.versionId) {
+      this.clearActiveProposal();
+      return { status: 'not_found', entity: 'proposal', id: input.proposalId };
+    }
+    if (context.revision !== proposal.baseRevision) {
+      this.clearActiveProposal();
+      return { status: 'revision_conflict', expected_revision: input.expectedRevision, current_revision: context.revision };
+    }
+    if ((context.document_revision ?? context.revision) !== proposal.documentRevision) {
+      this.clearActiveProposal();
+      return { status: 'invalid_command', message: 'The document changed after this preview. Preview the allocation again.' };
+    }
+    const result = this.run(source, () => {
+      switch (proposal.kind) {
+        case 'placement_changes':
+          return this.engine.apply_changes_as(input.versionId, input.expectedRevision, proposal.operations, source, proposal.reason);
+        case 'shelf_allocation':
+          return this.engine.apply_shelf_allocation_as(input.versionId, proposal.shelfId, proposal.strategy, input.expectedRevision, source, proposal.reason);
+        case 'sales_allocation':
+          return this.engine.apply_sales_allocation_as(input.versionId, proposal.request, input.expectedRevision, source, proposal.reason);
+      }
+    });
     if (result.status === 'applied') {
       this.observers.onProposalApplied?.(result, source);
     }

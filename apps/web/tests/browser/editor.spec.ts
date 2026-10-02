@@ -4,7 +4,7 @@ import { expect, test, type Page } from '@playwright/test';
 type SiteTool = { name: string; execute: (args: unknown, context?: { signal?: AbortSignal }) => Promise<unknown> };
 type SiteToolWindow = Window & { __planogramSiteTools: SiteTool[] };
 
-const SITE_TOOL_COUNT = 12;
+const SITE_TOOL_COUNT = 13;
 const SYNTHETIC_SOURCE = 'Synthetic representative 13-week average; not retailer actuals';
 
 /** Opens the editor and skips when the browser lacks WebGPU entirely. */
@@ -206,6 +206,7 @@ test('registers site tools and applies the first WebMCP write through the live p
     'planogram.distribute_shelf',
     'planogram.undo_change_set',
     'planogram.preview_shelf_allocation',
+    'planogram.preview_sales_allocation',
     'planogram.preview_changes',
     'planogram.apply_changes',
     'planogram.set_facings',
@@ -668,4 +669,230 @@ test('shelf validation belongs to its form and clears after correction, selectio
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   await expectRevision(page, 4);
   await expect(page.locator('.selection-panel [role="alert"]')).toHaveCount(0);
+});
+
+type SavedPlacement = {
+  id: string;
+  product_id: string;
+  shelf_id: string;
+  x_sixteenths: number;
+  facings_x: number;
+  facings_y: number;
+  facings_z: number;
+};
+
+async function startCerealAllocation(page: Page) {
+  await openEditorWithSiteTools(page);
+  await page.getByRole('button', { name: 'Cereal challenge', exact: true }).click();
+  await page.getByRole('button', { name: 'Start cereal challenge' }).click();
+  await expectRevision(page, 0);
+  await page.getByRole('combobox', { name: 'Focus bay' }).selectOption('bay_01');
+  await page.locator('.placement-list .companion-placement>button').first().click();
+  await expect(page.getByRole('heading', { name: 'Sales allocation', exact: true })).toBeVisible();
+}
+
+async function bayPlacements(page: Page, sectionId: string) {
+  const result = await callSiteTool<{ section: { shelves: Array<{ placements: SavedPlacement[] }> } }>(page, 'planogram.get_section', { section_id: sectionId });
+  return result.section.shelves.flatMap(shelf => shelf.placements);
+}
+
+async function expectEditorViewportStable(page: Page) {
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  const topbar = await page.locator('.topbar').boundingBox();
+  expect(topbar).not.toBeNull();
+  expect(topbar!.y).toBeGreaterThanOrEqual(0);
+}
+
+test('sales allocation previews all objectives, cancels without mutation, and saves an approved undoable cereal alternative', async ({ page, context }, testInfo) => {
+  test.setTimeout(60_000);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await startCerealAllocation(page);
+  await page.getByLabel('Maximum facings', { exact: true }).fill('24');
+  const originalFile = JSON.parse(await downloadBay(page, 'Before sales allocation'));
+  const originalDraft = originalFile.document.alternatives[0].draft;
+  const before = await bayPlacements(page, 'bay_01');
+  const previewButton = page.getByRole('button', { name: 'Preview sales allocation', exact: true });
+  const review = page.getByRole('heading', { name: 'Proposal review', exact: true });
+  const combinations = [
+    { basis: 'revenue', target: 'space', scope: 'shelf', label: 'Revenue contribution → space' },
+    { basis: 'units', target: 'facings', scope: 'shelf', label: 'Units contribution → facings' },
+    { basis: 'revenue', target: 'facings', scope: 'bay', label: 'Revenue contribution → facings' },
+    { basis: 'units', target: 'space', scope: 'bay', label: 'Units contribution → space' },
+  ];
+  for (const [index, choice] of combinations.entries()) {
+    await page.getByRole('combobox', { name: 'Sales contribution', exact: true }).selectOption(choice.basis);
+    await page.getByRole('combobox', { name: 'Allocate', exact: true }).selectOption(choice.target);
+    await page.getByRole('combobox', { name: 'Allocation scope', exact: true }).selectOption(choice.scope);
+    await previewButton.click();
+    await expect(review).toBeVisible();
+    await expect(review).toBeFocused();
+    await expectEditorViewportStable(page);
+    await expect(page.getByRole('heading', { name: 'Sales allocation preview', exact: true })).toBeVisible();
+    await expect(page.locator('.sales-report-summary')).toContainText(choice.label);
+    await expect(page.getByRole('region', { name: 'Sales allocation by product' })).toBeVisible();
+    await expect(page.locator('.sales-allocation-report')).toContainText('synthetic demand stays unchanged');
+    await expectRevision(page, 0);
+    expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+    if (index === combinations.length - 1) {
+      const path = testInfo.outputPath('sales-allocation-bay-preview.png');
+      await page.screenshot({ path });
+      await testInfo.attach('Synthetic units-to-space bay allocation preview', { path, contentType: 'image/png' });
+    } else {
+      await page.getByRole('button', { name: index === 0 ? 'Adjust allocation' : 'Reject', exact: true }).click();
+      await expect(review).not.toBeVisible();
+      await expect(previewButton).toBeFocused();
+      await expectEditorViewportStable(page);
+      await expect(page.getByRole('combobox', { name: 'Sales contribution', exact: true })).toHaveValue(choice.basis);
+      await expect(page.getByRole('combobox', { name: 'Allocate', exact: true })).toHaveValue(choice.target);
+      await expect(page.getByRole('combobox', { name: 'Allocation scope', exact: true })).toHaveValue(choice.scope);
+      expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+    }
+  }
+  // Saving a pending allocation must save only the exact committed draft.
+  const pending = JSON.parse(await downloadBay(page, 'Pending allocation excluded'));
+  expect(pending.document.alternatives[0].draft).toEqual(originalDraft);
+  await expect(review).toBeVisible();
+  await page.getByRole('button', { name: 'Accept proposal', exact: true }).click();
+  await expectRevision(page, 1);
+  const receipt = page.getByRole('heading', { name: 'Sales allocation applied', exact: true });
+  await expect(receipt).toBeVisible();
+  await expect(receipt).toBeFocused();
+  await expectEditorViewportStable(page);
+  expect(await bayPlacements(page, 'bay_01')).not.toEqual(before);
+  expect(await callSiteTool(page, 'planogram.validate_planogram')).toMatchObject({ status: 'ok', valid: true });
+  const saved = await downloadBay(page, 'Sales allocation approved');
+  const savedFile = JSON.parse(saved);
+  const allocated = savedFile.document.alternatives[0].draft;
+  expect(allocated.revision).toBe(1);
+  expect(allocated.change_sets).toHaveLength(1);
+  expect(allocated.change_sets[0]).toMatchObject({ actor: 'human', base_revision: 0, resulting_revision: 1 });
+  expect(allocated.products).toEqual(originalDraft.products);
+  expect(savedFile.document.baseline).toEqual(originalFile.document.baseline);
+  for (const prior of originalDraft.placements as SavedPlacement[]) {
+    const after = (allocated.placements as SavedPlacement[]).find(placement => placement.id === prior.id)!;
+    expect(after).toMatchObject({ product_id: prior.product_id, shelf_id: prior.shelf_id, facings_y: prior.facings_y, facings_z: prior.facings_z });
+    if (!prior.shelf_id.startsWith('bay_01_')) expect(after).toEqual(prior);
+  }
+  const repeated = await callSiteTool(page, 'planogram.preview_sales_allocation', {
+    scope: { kind: 'bay', section_id: 'bay_01' }, basis: 'units', target: 'space', min_facings: 1, max_facings: 24, expected_revision: 1,
+  });
+  expect(repeated).toMatchObject({ status: 'invalid_command' });
+  await expectRevision(page, 1);
+  expect(JSON.parse(await downloadBay(page, 'Repeat allocation')).document.alternatives[0].draft).toEqual(allocated);
+
+  const reopened = await context.newPage();
+  reopened.on('pageerror', error => errors.push(error.message));
+  await openEditorWithSiteTools(reopened);
+  await openBayText(reopened, saved);
+  await expectRevision(reopened, 1);
+  expect(JSON.parse(await downloadBay(reopened, 'Sales allocation approved'))).toEqual(savedFile);
+  await reopened.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expectRevision(reopened, 2);
+  const undone = JSON.parse(await downloadBay(reopened, 'Allocation undone'));
+  expect(undone.document.alternatives[0].draft.placements).toEqual(originalDraft.placements);
+  expect(undone.document.alternatives[0].draft.change_sets[1].compensates).toBe(allocated.change_sets[0].id);
+  expect(undone.document.baseline).toEqual(originalFile.document.baseline);
+  const undoPath = testInfo.outputPath('sales-allocation-reopened-undo.png');
+  await reopened.screenshot({ path: undoPath });
+  await testInfo.attach('Reopened allocation undone to the exact original arrangement', { path: undoPath, contentType: 'image/png' });
+  expect(errors).toEqual([]);
+});
+
+test('sales allocation validates bounds and impossible minimums in its own form without changing the draft', async ({ page }) => {
+  await startCerealAllocation(page);
+  const before = await bayPlacements(page, 'bay_01');
+  const preview = page.getByRole('button', { name: 'Preview sales allocation', exact: true });
+  const error = page.locator('#sales-allocation-error');
+  for (const [min, max, message] of [
+    ['0', '24', 'whole numbers from 1 to 100'],
+    ['1.5', '24', 'whole numbers from 1 to 100'],
+    ['4', '3', 'cannot exceed maximum'],
+    ['100', '100', 'cannot fit the minimum facings'],
+  ]) {
+    await page.getByLabel('Minimum facings', { exact: true }).fill(min);
+    await page.getByLabel('Maximum facings', { exact: true }).fill(max);
+    await preview.click();
+    await expect(error).toContainText(message);
+    await expectEditorViewportStable(page);
+    await expectRevision(page, 0);
+    await expect(page.getByRole('heading', { name: 'Proposal review', exact: true })).not.toBeVisible();
+    expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+  }
+  await page.getByLabel('Minimum facings', { exact: true }).fill('1');
+  await page.getByLabel('Maximum facings', { exact: true }).fill('24');
+  await expect(error).not.toBeVisible();
+  await preview.click();
+  await expect(page.getByRole('heading', { name: 'Proposal review', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Reject', exact: true }).click();
+  await expectRevision(page, 0);
+  expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+  await page.getByRole('combobox', { name: 'Scenario alternative' }).selectOption('-1');
+  await page.locator('.placement-list .companion-placement>button').first().click();
+  await expect(preview).toBeDisabled();
+  await expect(page.locator('.sales-allocation-unavailable')).toContainText('baseline is locked');
+  expect(await callSiteTool(page, 'planogram.preview_sales_allocation', {
+    scope: { kind: 'bay', section_id: 'bay_01' }, basis: 'revenue', target: 'space', min_facings: 1, max_facings: 24, expected_revision: 0,
+  })).toMatchObject({ status: 'forbidden' });
+});
+
+test('sales allocation WebMCP handles cancellation and rejects proposals after edits or same-revision alternative switches', async ({ page }) => {
+  await startCerealAllocation(page);
+  const request = { scope: { kind: 'bay', section_id: 'bay_01' }, basis: 'revenue', target: 'space', min_facings: 1, max_facings: 24, expected_revision: 0 };
+  const before = await bayPlacements(page, 'bay_01');
+  const cancelled = await page.evaluate(async args => {
+    const controller = new AbortController();
+    controller.abort();
+    const tool = (window as unknown as SiteToolWindow).__planogramSiteTools.find(candidate => candidate.name === 'planogram.preview_sales_allocation')!;
+    return await tool.execute(args, { signal: controller.signal });
+  }, request);
+  expect(cancelled).toMatchObject({ status: 'error', code: 'cancelled', revision: 0 });
+  await expectRevision(page, 0);
+  expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+  await expect(page.getByRole('heading', { name: 'Proposal review', exact: true })).not.toBeVisible();
+  const discarded = await callSiteTool<{ status: string; proposal_id: string }>(page, 'planogram.preview_sales_allocation', request);
+  expect(discarded.status).toBe('ready');
+  await page.getByRole('button', { name: 'Reject', exact: true }).click();
+  expect(await callSiteTool(page, 'planogram.apply_changes', { proposal_id: discarded.proposal_id, expected_revision: 0 })).toMatchObject({ status: 'not_found' });
+  const oldAlternative = await callSiteTool<{ status: string; proposal_id: string }>(page, 'planogram.preview_sales_allocation', request);
+  expect(oldAlternative.status).toBe('ready');
+  const alternative = page.getByRole('combobox', { name: 'Scenario alternative' });
+  const duplicate = page.getByRole('button', { name: 'Duplicate target', exact: true });
+  const cancelledDuplicateDialog = page.waitForEvent('dialog');
+  const cancelledDuplicateClick = duplicate.click();
+  const cancelDialog = await cancelledDuplicateDialog;
+  expect(cancelDialog.type()).toBe('confirm');
+  expect(cancelDialog.message()).toContain('Discard the pending proposal');
+  await cancelDialog.dismiss();
+  await cancelledDuplicateClick;
+  await expect(alternative).toHaveValue('0');
+  await expect(alternative.locator('option')).toHaveCount(2); // Baseline and the original target.
+  await expect(page.getByRole('heading', { name: 'Proposal review', exact: true })).toBeVisible();
+  await expectRevision(page, 0);
+  expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+
+  const acceptedDuplicateDialog = page.waitForEvent('dialog');
+  const acceptedDuplicateClick = duplicate.click();
+  const acceptDialog = await acceptedDuplicateDialog;
+  expect(acceptDialog.type()).toBe('confirm');
+  expect(acceptDialog.message()).toContain('Discard the pending proposal');
+  await acceptDialog.accept();
+  await acceptedDuplicateClick;
+  await expect(alternative).toHaveValue('1');
+  await expect(alternative.locator('option')).toHaveCount(3); // Baseline plus two alternatives.
+  await expect(page.getByRole('heading', { name: 'Proposal review', exact: true })).not.toBeVisible();
+  await expectRevision(page, 0);
+  expect(await callSiteTool(page, 'planogram.apply_changes', { proposal_id: oldAlternative.proposal_id, expected_revision: 0 })).toMatchObject({ status: 'not_found' });
+  expect(await bayPlacements(page, 'bay_01')).toEqual(before);
+  const stale = await callSiteTool<{ status: string; proposal_id: string }>(page, 'planogram.preview_sales_allocation', request);
+  expect(stale.status).toBe('ready');
+  const removal = await callSiteTool<{ proposal_id: string }>(page, 'planogram.preview_changes', {
+    expected_revision: 0, operations: [{ kind: 'remove', placement_id: before[0].id }], reason: 'Independent assortment edit invalidates the old allocation',
+  });
+  expect(await callSiteTool(page, 'planogram.apply_changes', { proposal_id: removal.proposal_id, expected_revision: 0 })).toMatchObject({ status: 'applied', revision: 1 });
+  const afterRemoval = await bayPlacements(page, 'bay_01');
+  expect(await callSiteTool(page, 'planogram.apply_changes', { proposal_id: stale.proposal_id, expected_revision: 0 })).toMatchObject({ status: 'not_found' });
+  expect(await callSiteTool(page, 'planogram.preview_sales_allocation', request)).toMatchObject({ status: 'revision_conflict', current_revision: 1 });
+  await expectRevision(page, 1);
+  expect(await bayPlacements(page, 'bay_01')).toEqual(afterRemoval);
 });

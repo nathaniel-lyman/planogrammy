@@ -1,7 +1,7 @@
 import { resultError } from './commands';
 import { getPlanogramContext, getSection, searchProducts, toToolChangeSet, toToolOperation, toToolPlacement, toToolProduct } from './queries';
 import type { PlanogramSession, SessionPreviewResult } from './session';
-import type { CommandResult, PlacementChange, Selection } from './types';
+import type { CommandResult, PlacementChange, SalesAllocationRequest, SalesAllocationScope, Selection } from './types';
 
 type JsonSchema = {
   type: 'object' | 'string' | 'integer' | 'array' | 'boolean';
@@ -189,6 +189,41 @@ function readPlacementChanges(args: unknown, revision: number): PlacementChange[
   return changes;
 }
 
+function readSalesAllocationRequest(args: unknown, revision: number): SalesAllocationRequest | ToolError {
+  const record = isRecord(args) ? args : {};
+  const rawScope = record.scope;
+  if (!isRecord(rawScope) || (rawScope.kind !== 'shelf' && rawScope.kind !== 'bay')) {
+    return { status: 'error', code: 'invalid_input', message: 'scope must identify a shelf or bay.', revision };
+  }
+  const idKey = rawScope.kind === 'shelf' ? 'shelf_id' : 'section_id';
+  const unexpected = Object.keys(rawScope).find(key => key !== 'kind' && key !== idKey);
+  if (unexpected) {
+    return { status: 'error', code: 'invalid_input', message: `Unknown argument: scope.${unexpected}.`, revision };
+  }
+  const id = readRequiredString(rawScope, idKey, 120, revision);
+  if (typeof id !== 'string') return id;
+  const scope: SalesAllocationScope = rawScope.kind === 'shelf'
+    ? { kind: 'shelf', shelf_id: id }
+    : { kind: 'bay', section_id: id };
+  if (record.basis !== 'revenue' && record.basis !== 'units') {
+    return { status: 'error', code: 'invalid_input', message: 'basis must be revenue or units.', revision };
+  }
+  if (record.target !== 'space' && record.target !== 'facings') {
+    return { status: 'error', code: 'invalid_input', message: 'target must be space or facings.', revision };
+  }
+  const minimum = readOptionalFacing(record, 'min_facings', revision);
+  const maximum = readOptionalFacing(record, 'max_facings', revision);
+  if (isToolError(minimum)) return minimum;
+  if (isToolError(maximum)) return maximum;
+  if (minimum === undefined || maximum === undefined) {
+    return { status: 'error', code: 'invalid_input', message: 'min_facings and max_facings are required integers from 1 to 100.', revision };
+  }
+  if (minimum > maximum) {
+    return { status: 'error', code: 'invalid_input', message: 'min_facings must not exceed max_facings.', revision };
+  }
+  return { scope, basis: record.basis, target: record.target, min_facings: minimum, max_facings: maximum };
+}
+
 function cancelled(revision: number): ToolError {
   return { status: 'error', code: 'cancelled', message: 'The site-tool request was cancelled.', revision };
 }
@@ -241,6 +276,7 @@ function previewResult(result: SessionPreviewResult, session: PlanogramSession):
       affected_ids: result.affected_ids,
       operations: result.operations.map(toToolOperation),
       validation: result.validation,
+      ...(result.sales_allocation ? { sales_allocation: result.sales_allocation } : {}),
     };
   }
   if (result.status === 'validation_failed') {
@@ -431,6 +467,33 @@ function schemas(): SiteToolDefinition[] {
       execute: () => undefined,
     },
     {
+      name: 'planogram.preview_sales_allocation',
+      title: 'Preview allocation by sales contribution',
+      description: 'Previews a Rust-resolved allocation using synthetic revenue or unit contribution to target display-space or horizontal-facing shares on one shelf or bay. Retains represented SKUs, shelf assignments, stable order, loaded-tray presets, vertical and depth facings; min/max horizontal facings bound each loose placement. Demand is counted once per represented SKU, including fixed trays. Bay scope includes occupied adjustable shelves only. Rust validates physical fit and returns per-SKU before/after shares and warnings. This does not change the draft or forecast sales uplift; review before applying.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: {
+            type: 'object',
+            oneOf: [
+              { type: 'object', properties: { kind: { type: 'string', enum: ['shelf'] }, shelf_id: { type: 'string', maxLength: 120 } }, required: ['kind', 'shelf_id'], additionalProperties: false },
+              { type: 'object', properties: { kind: { type: 'string', enum: ['bay'] }, section_id: { type: 'string', maxLength: 120 } }, required: ['kind', 'section_id'], additionalProperties: false },
+            ],
+          },
+          basis: { type: 'string', enum: ['revenue', 'units'] },
+          target: { type: 'string', enum: ['space', 'facings'] },
+          min_facings: { type: 'integer', minimum: 1, maximum: 100 },
+          max_facings: { type: 'integer', minimum: 1, maximum: 100 },
+          expected_revision: { type: 'integer', minimum: 0, maximum: 4_294_967_295 },
+          reason: { type: 'string', maxLength: 240 },
+        },
+        required: ['scope', 'basis', 'target', 'min_facings', 'max_facings', 'expected_revision'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true },
+      execute: () => undefined,
+    },
+    {
       name: 'planogram.preview_changes',
       title: 'Preview generic planogram changes',
       description: 'Builds a read-only proposal from generic add, move, and remove placement operations. The model expresses shelf assignment and zero-based sequence (include move operations for existing items that should participate in the requested order); omit facings for tray-configured products so Rust resolves the catalog preset and loaded tray envelope. Rust resolves physical x positions on the 1/8-inch grid and checks fit, the 1/8-inch minimum gap, overlap, shelf capacity, and all other planogram constraints without changing the draft.',
@@ -450,7 +513,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.apply_changes',
       title: 'Apply reviewed planogram proposal',
-      description: 'Applies one proposal previously returned by planogram.preview_changes or planogram.preview_shelf_allocation. The semantic proposal is recomputed and revalidated at the supplied revision, then commits as one atomic WebMCP change set or changes nothing.',
+      description: 'Applies one reviewed proposal previously returned by planogram.preview_changes, planogram.preview_shelf_allocation, or planogram.preview_sales_allocation. The retained semantic intent is recomputed and revalidated in the same open document at the supplied revision, then commits as one atomic WebMCP change set or changes nothing. A proposal can be applied only once; repeat a preview after edits or document changes.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -486,7 +549,7 @@ function schemas(): SiteToolDefinition[] {
 
 function bindTools(session: PlanogramSession, getSelection: () => Selection | undefined): SiteToolDefinition[] {
   const tools = schemas();
-  const [contextTool, searchTool, productTool, sectionTool, validationTool, addTool, distributeTool, undoTool, allocationPreviewTool, previewTool, applyTool, facingsTool] = tools;
+  const [contextTool, searchTool, productTool, sectionTool, validationTool, addTool, distributeTool, undoTool, allocationPreviewTool, salesPreviewTool, previewTool, applyTool, facingsTool] = tools;
   contextTool.execute = (_args, executionContext) => {
     const context = session.context();
     if (requestWasCancelled(executionContext)) return cancelled(context.revision);
@@ -607,6 +670,19 @@ function bindTools(session: PlanogramSession, getSelection: () => Selection | un
       expectedRevision,
       reason,
     }), session);
+  };
+  salesPreviewTool.execute = (args, executionContext) => {
+    const context = session.context();
+    if (requestWasCancelled(executionContext)) return cancelled(context.revision);
+    const argumentError = validateArguments(args, ['scope', 'basis', 'target', 'min_facings', 'max_facings', 'expected_revision', 'reason'], context.revision);
+    if (argumentError) return argumentError;
+    const request = readSalesAllocationRequest(args, context.revision);
+    if (isToolError(request)) return request;
+    const expectedRevision = readRequiredRevision(args, context.revision);
+    if (typeof expectedRevision !== 'number') return expectedRevision;
+    const reason = readOptionalString(args, 'reason', 240, context.revision);
+    if (typeof reason !== 'string' && reason !== undefined) return reason;
+    return previewResult(session.previewSalesAllocation({ versionId: context.version_id, request, expectedRevision, reason }), session);
   };
   previewTool.execute = (args, executionContext) => {
     const context = session.context();

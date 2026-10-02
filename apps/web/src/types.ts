@@ -130,6 +130,46 @@ export interface FacingsRequest {
 export type ShelfDistribution = 'packed_left' | 'centered' | 'space_between' | 'space_evenly';
 export type ShelfAllocationStrategy = 'fill_evenly';
 
+export type SalesAllocationScope =
+  | { kind: 'shelf'; shelf_id: string }
+  | { kind: 'bay'; section_id: string };
+export type SalesAllocationBasis = 'revenue' | 'units';
+export type SalesAllocationTarget = 'space' | 'facings';
+
+/** Semantic intent only; Rust resolves all physical positions and facing counts. */
+export interface SalesAllocationRequest {
+  scope: SalesAllocationScope;
+  basis: SalesAllocationBasis;
+  target: SalesAllocationTarget;
+  min_facings: number;
+  max_facings: number;
+}
+
+export interface SalesAllocationRow {
+  product_id: string;
+  contribution_basis_points: number;
+  before_facings: number;
+  after_facings: number;
+  before_space_sixteenths: number;
+  after_space_sixteenths: number;
+  before_share_basis_points: number;
+  after_share_basis_points: number;
+}
+
+export interface SalesAllocationReport {
+  basis: SalesAllocationBasis;
+  target: SalesAllocationTarget;
+  scope: SalesAllocationScope;
+  product_count: number;
+  shelf_count: number;
+  fixed_tray_count: number;
+  zero_weight_sku_count: number;
+  period: string;
+  source: string;
+  rows: SalesAllocationRow[];
+  warnings: string[];
+}
+
 export interface ChangeSet {
   id: string;
   actor: string;
@@ -169,7 +209,7 @@ export type PlacementChange =
   | { kind: 'remove'; placement_id: string };
 
 export type PreviewResult =
-  | { status: 'ready'; revision: number; operations: unknown[]; affected_ids: string[]; validation: { issues: ValidationIssue[] }; preview_scene: RenderScene }
+  | { status: 'ready'; revision: number; operations: unknown[]; affected_ids: string[]; validation: { issues: ValidationIssue[] }; preview_scene: RenderScene; sales_allocation?: SalesAllocationReport }
   | { status: 'validation_failed'; revision: number; validation: { issues: ValidationIssue[] } }
   | { status: 'revision_conflict'; expected_revision: number; current_revision: number }
   | { status: 'not_found'; entity: string; id: string }
@@ -197,9 +237,11 @@ export interface WasmEngine {
   remove_placement(versionId: string, placementId: string, expectedRevision: number, reason: string): CommandResult;
   preview_changes(versionId: string, expectedRevision: number, changes: PlacementChange[]): PreviewResult;
   preview_shelf_allocation(versionId: string, shelfId: string, strategy: ShelfAllocationStrategy, expectedRevision: number): PreviewResult;
+  preview_sales_allocation(versionId: string, request: SalesAllocationRequest, expectedRevision: number): PreviewResult;
   clear_proposal_preview(): void;
   apply_changes_as(versionId: string, expectedRevision: number, changes: PlacementChange[], actor: string, reason: string): CommandResult;
   apply_shelf_allocation_as(versionId: string, shelfId: string, strategy: ShelfAllocationStrategy, expectedRevision: number, actor: string, reason: string): CommandResult;
+  apply_sales_allocation_as(versionId: string, request: SalesAllocationRequest, expectedRevision: number, actor: string, reason: string): CommandResult;
   undo_change_set(versionId: string, changeSetId: string, expectedRevision: number): CommandResult;
   undo_change_set_as(versionId: string, changeSetId: string, expectedRevision: number, actor: string): CommandResult;
   resize(width: number, height: number): void;

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlanogramSession } from './session';
 import { registerPlanogramWebMcp } from './webmcp';
-import { PERFORMANCE_SOURCE, VERSION_ID, adjustableShelf, appliedResult, baseDeck, changeSetId, loosePlacement, looseProduct, makeContext, readyPreview, reflowOperation, revisionConflict, trayPlacement, trayProduct } from './testFixtures';
-import type { CommandResult, EngineContext, PreviewResult, WasmEngine } from './types';
+import { PERFORMANCE_SOURCE, VERSION_ID, adjustableShelf, appliedResult, baseDeck, changeSetId, loosePlacement, looseProduct, makeContext, readyPreview, readySalesAllocationPreview, reflowOperation, revisionConflict, salesAllocationRequest, trayPlacement, trayProduct } from './testFixtures';
+import type { CommandResult, EngineContext, PreviewResult, SalesAllocationRequest, WasmEngine } from './types';
 
 interface RegisteredTool {
   name: string;
@@ -49,6 +49,8 @@ const engine = {
     readyPreview(activeContext.revision, [{ type: 'add_placement', placement: trayPlacement() }]))),
   preview_shelf_allocation: vi.fn((_versionId: string, _shelfId: string, _strategy: string, expectedRevision: number) => guarded(expectedRevision, () =>
     readyPreview(activeContext.revision, [reflowOperation(activeContext.placements[0], { x: 4, facings_x: 4 })]))),
+  preview_sales_allocation: vi.fn((_versionId: string, request: SalesAllocationRequest, expectedRevision: number): PreviewResult => guarded(expectedRevision, () =>
+    readySalesAllocationPreview(activeContext.revision, request))),
   clear_proposal_preview: vi.fn(),
   apply_changes_as: vi.fn((_versionId: string, expectedRevision: number, _changes: unknown[], actor: string, reason: string) => guarded(expectedRevision, () => {
     const placement = trayPlacement();
@@ -58,6 +60,8 @@ const engine = {
     const current = activeContext.placements[0];
     return commit(actor, reason, {}, [reflowOperation(current, { x: 4, facings_x: 4 })], [current.id]);
   })),
+  apply_sales_allocation_as: vi.fn((_versionId: string, _request: SalesAllocationRequest, expectedRevision: number, actor: string, reason: string) => guarded(expectedRevision, () =>
+    commit(actor, reason, {}, readySalesAllocationPreview(activeContext.revision).operations, ['placement_0002']))),
 };
 
 function tool(name: string): RegisteredTool {
@@ -88,9 +92,9 @@ describe('WebMCP site tools', () => {
   });
 
   it('registers strict read and write tools only after WebMCP support is present', () => {
-    expect(registered).toHaveLength(12);
+    expect(registered).toHaveLength(13);
     expect(registered.every(registeredTool => registeredTool.inputSchema.additionalProperties === false)).toBe(true);
-    for (const name of ['get_planogram_context', 'validate_planogram', 'preview_shelf_allocation', 'preview_changes']) {
+    for (const name of ['get_planogram_context', 'validate_planogram', 'preview_shelf_allocation', 'preview_sales_allocation', 'preview_changes']) {
       expect(tool(`planogram.${name}`).annotations?.readOnlyHint).toBe(true);
     }
     for (const name of ['add_product', 'distribute_shelf', 'set_facings', 'apply_changes']) {
@@ -241,5 +245,88 @@ describe('WebMCP site tools', () => {
     });
     expect(engine.preview_changes).toHaveBeenCalledWith(VERSION_ID, 0, [add]);
     expect(engine.apply_changes_as).toHaveBeenCalledWith(VERSION_ID, 0, [add], 'webmcp', 'Group the Jif family by size');
+  });
+
+  it.each([
+    ['revenue', 'space'], ['revenue', 'facings'], ['units', 'space'], ['units', 'facings'],
+  ] as const)('transports %s contribution to %s allocation and returns the Rust report', async (basis, target) => {
+    const request = salesAllocationRequest({ basis, target, scope: { kind: 'bay', section_id: 'section_01' } });
+    const before = activeContext;
+    expect(await execute('planogram.preview_sales_allocation', { ...request, expected_revision: 0, reason: 'Allocate by synthetic contribution' })).toMatchObject({
+      status: 'ready',
+      revision: 0,
+      proposal_id: 'proposal_0001',
+      sales_allocation: readySalesAllocationPreview(0, request).sales_allocation,
+      operations: [{ type: 'reflow_placement', before: { x_sixteenths: 0, facings_x: 1 }, after: { x_sixteenths: 300, facings_x: 3 } }],
+    });
+    expect(activeContext).toBe(before);
+    expect(engine.preview_sales_allocation).toHaveBeenCalledWith(VERSION_ID, request, 0);
+    expect(await execute('planogram.apply_changes', { proposal_id: 'proposal_0001', expected_revision: 0 })).toMatchObject({ status: 'applied', revision: 1, change_set: { actor: 'webmcp', reason: 'Allocate by synthetic contribution' } });
+    expect(engine.apply_sales_allocation_as).toHaveBeenCalledWith(VERSION_ID, request, 0, 'webmcp', 'Allocate by synthetic contribution');
+    expect(await execute('planogram.apply_changes', { proposal_id: 'proposal_0001', expected_revision: 1 })).toMatchObject({ status: 'not_found' });
+    expect(engine.apply_sales_allocation_as).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { scope: null },
+    { scope: [] },
+    { scope: { kind: 'fixture', fixture_id: 'fixture_standard_4ft' } },
+    { scope: { kind: 'shelf', shelf_id: '' } },
+    { scope: { kind: 'shelf', shelf_id: 2 } },
+    { scope: { kind: 'shelf', shelf_id: 'shelf_01', section_id: 'section_01' } },
+    { scope: { kind: 'bay', section_id: 'section_01', x_sixteenths: 0 } },
+    { scope: { kind: 'bay', section_id: { nested: 'section_01' } } },
+    { basis: 'margin' },
+    { target: 'predicted_sales' },
+    { min_facings: 0 },
+    { min_facings: 1.5 },
+    { min_facings: undefined },
+    { min_facings: 8, max_facings: 7 },
+    { max_facings: 101 },
+    { max_facings: '6' },
+    { max_facings: null },
+    { max_facings: true },
+    { max_facings: undefined },
+    { expected_revision: 4_294_967_296 },
+    { reason: { unsafe: 'value' } },
+    { x_sixteenths: 0 },
+  ])('rejects malformed sales-allocation arguments %# before invoking Wasm', async overrides => {
+    expect(await execute('planogram.preview_sales_allocation', { ...salesAllocationRequest(), expected_revision: 0, ...overrides })).toMatchObject({ status: 'error', code: 'invalid_input', revision: 0 });
+    expect(engine.preview_sales_allocation).not.toHaveBeenCalled();
+    expect(engine.apply_sales_allocation_as).not.toHaveBeenCalled();
+    expect(activeContext.revision).toBe(0);
+  });
+
+  it('preserves a ready sales proposal when either preview or approval is cancelled', async () => {
+    const request = { ...salesAllocationRequest(), expected_revision: 0 };
+    const controller = new AbortController();
+    controller.abort();
+    expect(await execute('planogram.preview_sales_allocation', request)).toMatchObject({ status: 'ready', proposal_id: 'proposal_0001' });
+    expect(await tool('planogram.preview_sales_allocation').execute(request, { signal: controller.signal })).toMatchObject({ status: 'error', code: 'cancelled' });
+    expect(await tool('planogram.apply_changes').execute({ proposal_id: 'proposal_0001', expected_revision: 0 }, { signal: controller.signal })).toMatchObject({ status: 'error', code: 'cancelled' });
+    expect(engine.preview_sales_allocation).toHaveBeenCalledOnce();
+    expect(engine.apply_sales_allocation_as).not.toHaveBeenCalled();
+    expect(activeContext.revision).toBe(0);
+    expect(await execute('planogram.apply_changes', { proposal_id: 'proposal_0001', expected_revision: 0 })).toMatchObject({ status: 'applied', revision: 1 });
+  });
+
+  it('forwards insufficient-data and infeasible reports without retaining a proposal', async () => {
+    const request = { ...salesAllocationRequest(), expected_revision: 0 };
+    for (const message of ['No positive contribution is available.', 'Minimum facings exceed physical shelf capacity.']) {
+      engine.preview_sales_allocation.mockReturnValueOnce({ status: 'validation_failed', revision: 0, validation: { issues: [{ code: 'sales_allocation', message }] } });
+      expect(await execute('planogram.preview_sales_allocation', request)).toEqual({ status: 'validation_failed', revision: 0, validation: { issues: [{ code: 'sales_allocation', message }] } });
+    }
+    expect(await execute('planogram.apply_changes', { proposal_id: 'proposal_0001', expected_revision: 0 })).toMatchObject({ status: 'not_found' });
+    expect(engine.apply_sales_allocation_as).not.toHaveBeenCalled();
+  });
+
+  it('rejects stale sales previews and same-revision document replacements', async () => {
+    activeContext = { ...activeContext, revision: 3, document_revision: 12 };
+    expect(await execute('planogram.preview_sales_allocation', { ...salesAllocationRequest(), expected_revision: 2 })).toEqual(revisionConflict(2, 3));
+    expect(await execute('planogram.preview_sales_allocation', { ...salesAllocationRequest(), expected_revision: 3 })).toMatchObject({ status: 'ready', proposal_id: 'proposal_0001' });
+    activeContext = { ...activeContext, document_revision: 13 };
+    expect(await execute('planogram.apply_changes', { proposal_id: 'proposal_0001', expected_revision: 3 })).toMatchObject({ status: 'invalid_command', message: expect.stringContaining('document changed') });
+    expect(engine.apply_sales_allocation_as).not.toHaveBeenCalled();
+    expect(activeContext.revision).toBe(3);
   });
 });

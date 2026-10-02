@@ -1938,3 +1938,695 @@ fn cereal_snapshot_rejects_changed_genesis_and_unsupported_generator_version() {
     assert!(changed.validate_snapshot().is_err());
     assert_eq!(original, cereal_draft(20_260_930, 6).unwrap());
 }
+
+const SALES_TEST_PRODUCTS: [&str; 3] =
+    ["jif_crunchy_16", "skippy_chunk_16", "peter_pan_crunchy_16"];
+
+/// Small, explicitly synthetic examples make the chosen objective observable
+/// without relying on the representative catalog's correlated sales figures.
+fn sales_draft(inputs: &[(i32, u64, u64)]) -> DraftVersion {
+    let mut draft = DraftVersion::default();
+    for (id, &(width, revenue, units)) in SALES_TEST_PRODUCTS.iter().zip(inputs) {
+        let catalog_product = draft
+            .products
+            .iter_mut()
+            .find(|p| p.id == product(id))
+            .unwrap();
+        catalog_product.dimensions.width = Length::from_sixteenths(width);
+        catalog_product.dimensions.height = Length::inches(2);
+        catalog_product.dimensions.depth = Length::inches(2);
+        catalog_product.performance.sales_per_store_per_week_cents = revenue;
+        catalog_product
+            .performance
+            .units_per_store_per_week_milliunits = units;
+        catalog_product.performance.source = "Synthetic allocation regression example".to_string();
+        add(&mut draft, id, "shelf_01");
+    }
+    draft
+}
+
+fn sales_request(
+    basis: SalesAllocationBasis,
+    target: SalesAllocationTarget,
+) -> SalesAllocationRequest {
+    SalesAllocationRequest {
+        scope: SalesAllocationScope::Shelf {
+            shelf_id: shelf("shelf_01"),
+        },
+        basis,
+        target,
+        min_facings: 1,
+        max_facings: 24,
+    }
+}
+
+fn allocate_sales(draft: &mut DraftVersion, request: &SalesAllocationRequest) -> CommandResult {
+    let version = draft.id.clone();
+    let revision = draft.revision;
+    draft.apply_sales_allocation_as(
+        &version,
+        request,
+        revision,
+        "test",
+        "Synthetic sales allocation",
+    )
+}
+
+#[test]
+fn sales_allocation_revenue_and_units_follow_the_chosen_demand_basis() {
+    let original = sales_draft(&[(40, 9_000, 1_000), (40, 1_000, 9_000)]);
+    let mut by_revenue = original.clone();
+    let mut by_units = original;
+    expect_applied(allocate_sales(
+        &mut by_revenue,
+        &sales_request(
+            SalesAllocationBasis::Revenue,
+            SalesAllocationTarget::Facings,
+        ),
+    ));
+    expect_applied(allocate_sales(
+        &mut by_units,
+        &sales_request(SalesAllocationBasis::Units, SalesAllocationTarget::Facings),
+    ));
+    assert!(by_revenue.placements[0].facings_x > by_revenue.placements[1].facings_x);
+    assert!(by_units.placements[0].facings_x < by_units.placements[1].facings_x);
+    // The stable left-to-right tie-break can give one residual facing to the
+    // earlier SKU, so reversing demand need not produce a perfect mirror.
+    assert!(
+        by_revenue.placements[0]
+            .facings_x
+            .abs_diff(by_units.placements[1].facings_x)
+            <= 1
+    );
+    assert!(
+        by_revenue.placements[1]
+            .facings_x
+            .abs_diff(by_units.placements[0].facings_x)
+            <= 1
+    );
+    assert!(by_revenue.validate_planogram().valid);
+    assert!(by_units.validate_planogram().valid);
+}
+
+#[test]
+fn sales_allocation_space_and_facings_are_distinct_objectives() {
+    let original = sales_draft(&[(40, 1_000, 1_000), (80, 1_000, 1_000)]);
+    let mut by_space = original.clone();
+    let mut by_facings = original;
+    expect_applied(allocate_sales(
+        &mut by_space,
+        &sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space),
+    ));
+    expect_applied(allocate_sales(
+        &mut by_facings,
+        &sales_request(
+            SalesAllocationBasis::Revenue,
+            SalesAllocationTarget::Facings,
+        ),
+    ));
+    let space = shelf_views(&by_space, "shelf_01");
+    let facings = shelf_views(&by_facings, "shelf_01");
+    assert!(space[0].facings_x > space[1].facings_x);
+    let space_imbalance = (space[0].geometry.display_width - space[1].geometry.display_width)
+        .sixteenths()
+        .abs();
+    let facing_imbalance = (facings[0].geometry.display_width - facings[1].geometry.display_width)
+        .sixteenths()
+        .abs();
+    assert!(
+        space_imbalance < facing_imbalance,
+        "Space allocation should bring equal-demand SKUs closer to equal width"
+    );
+    assert!(facings[0].facings_x.abs_diff(facings[1].facings_x) <= 1);
+    assert_ne!(by_space.placements, by_facings.placements);
+}
+
+#[test]
+fn sales_allocation_preview_is_deterministic_non_mutating_and_matches_apply_and_exact_undo() {
+    let mut draft = sales_draft(&[(57, 1_200, 4_000), (59, 3_700, 2_000), (61, 2_600, 3_000)]);
+    let id = draft.placements[0].id.clone();
+    expect_applied(set_facings(
+        &mut draft,
+        &id.0,
+        facings(None, Some(2), Some(3)),
+    ));
+    // A neighboring shelf's differently sourced data is outside this request.
+    add(&mut draft, "jif_creamy_40", "shelf_02");
+    let before = draft.clone();
+    let version = draft.id.clone();
+    let request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    let preview = draft.preview_sales_allocation(&version, &request, draft.revision);
+    for _ in 0..5 {
+        assert_eq!(
+            draft.preview_sales_allocation(&version, &request, draft.revision),
+            preview
+        );
+    }
+    let PreviewResult::Ready {
+        operations,
+        preview_scene,
+        sales_allocation: Some(_),
+        validation,
+        ..
+    } = preview
+    else {
+        panic!("expected a report and ready allocation preview");
+    };
+    assert!(validation.valid());
+    assert_eq!(draft, before);
+    let applied = expect_applied(allocate_sales(&mut draft, &request));
+    assert_eq!(applied.revision, before.revision + 1);
+    assert_eq!(draft.change_sets.len(), before.change_sets.len() + 1);
+    assert_eq!(applied.change_set.operations, operations);
+    assert_eq!(draft.render_scene().placements, preview_scene.placements);
+    assert_eq!(
+        draft.products, before.products,
+        "Allocation must never change assumed demand"
+    );
+    for (after, prior) in draft.placements.iter().zip(&before.placements) {
+        assert_eq!(
+            (&after.id, &after.product_id, &after.shelf_id),
+            (&prior.id, &prior.product_id, &prior.shelf_id)
+        );
+        assert_eq!(
+            (after.facings_y, after.facings_z),
+            (prior.facings_y, prior.facings_z)
+        );
+        if prior.shelf_id != shelf("shelf_01") {
+            assert_eq!(after, prior);
+        }
+    }
+    assert_even_blocks(&draft, "shelf_01");
+    assert!(draft.validate_planogram().valid);
+    let undone =
+        expect_applied(draft.undo_change_set(&version, &applied.change_set.id, draft.revision));
+    assert_eq!(undone.change_set.compensates, Some(applied.change_set.id));
+    assert_eq!(draft.placements, before.placements);
+    assert_eq!(draft.fixture, before.fixture);
+    assert_eq!(draft.revision, before.revision + 2);
+}
+
+#[test]
+fn sales_allocation_rejects_invalid_facing_bounds_and_infeasible_minima_atomically() {
+    let mut draft = sales_draft(&[(100, 1_000, 1_000), (100, 1_000, 1_000)]);
+    for (min_facings, max_facings) in [(0, 1), (1, 0), (3, 2), (1, 101), (101, 101)] {
+        let mut request =
+            sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+        request.min_facings = min_facings;
+        request.max_facings = max_facings;
+        assert_rejected_unchanged(&mut draft, ValidationCode::InvalidFacingCount, |draft| {
+            allocate_sales(draft, &request)
+        });
+    }
+    let mut request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    request.min_facings = 4;
+    assert_rejected_unchanged(&mut draft, ValidationCode::NoShelfCapacity, |draft| {
+        allocate_sales(draft, &request)
+    });
+}
+
+#[test]
+fn sales_allocation_accounts_for_odd_width_grid_padding_when_minimum_looks_like_it_fits() {
+    let mut draft = sales_draft(&[(84, 1_000, 1_000), (85, 1_000, 1_000), (85, 1_000, 1_000)]);
+    draft.shelf_mut(&shelf("shelf_01")).unwrap().width = Length::from_sixteenths(766);
+    assert!(draft.validate_planogram().valid);
+    let mut request = sales_request(
+        SalesAllocationBasis::Revenue,
+        SalesAllocationTarget::Facings,
+    );
+    request.min_facings = 3;
+    // 252 + 255 + 255 + two 2-unit gaps = 766, but the third item
+    // must start on the even grid, so the arrangement actually needs 767.
+    assert_rejected_unchanged(&mut draft, ValidationCode::NoShelfCapacity, |draft| {
+        allocate_sales(draft, &request)
+    });
+}
+
+#[test]
+fn sales_allocation_with_odd_widths_is_grid_aligned_and_leaves_no_extra_facing_that_fits() {
+    let mut draft = sales_draft(&[(57, 1_000, 1_000), (59, 2_000, 1_000), (61, 3_000, 1_000)]);
+    expect_applied(allocate_sales(
+        &mut draft,
+        &sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space),
+    ));
+    assert!(draft.validate_planogram().valid);
+    assert!(draft.placements.iter().all(|p| p.x.sixteenths() % 2 == 0));
+    assert_even_blocks(&draft, "shelf_01");
+    for placement in draft.placements.clone() {
+        assert_rejected_unchanged(&mut draft, ValidationCode::NoShelfCapacity, |draft| {
+            set_facings(
+                draft,
+                &placement.id.0,
+                facings(Some(placement.facings_x + 1), None, None),
+            )
+        });
+    }
+}
+
+#[test]
+fn sales_allocation_zero_demand_stays_at_minimum_and_caps_leave_honest_slack() {
+    let mut draft = sales_draft(&[(40, 0, 0), (40, 1_000, 1_000)]);
+    let mut request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    request.min_facings = 2;
+    request.max_facings = 4;
+    expect_applied(allocate_sales(&mut draft, &request));
+    assert_eq!(draft.placements[0].facings_x, 2);
+    assert_eq!(draft.placements[1].facings_x, 4);
+    assert!(draft.validate_planogram().valid);
+    let before = draft.clone();
+    assert!(matches!(
+        allocate_sales(&mut draft, &request),
+        CommandResult::InvalidCommand { .. }
+    ));
+    assert_eq!(
+        draft, before,
+        "Repeating a resolved allocation must not create another revision"
+    );
+    for catalog_product in &mut draft.products {
+        catalog_product.performance.sales_per_store_per_week_cents = 0;
+    }
+    assert_rejected_unchanged(
+        &mut draft,
+        ValidationCode::InvalidProductPerformance,
+        |draft| allocate_sales(draft, &request),
+    );
+}
+
+#[test]
+fn sales_allocation_requires_coherent_sourced_performance_and_valid_catalog_dimensions() {
+    let original = sales_draft(&[(40, 1_000, 1_000), (40, 1_000, 1_000)]);
+    let request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    for corrupt in [
+        |p: &mut Product| p.performance.source.clear(),
+        |p: &mut Product| p.performance.period.clear(),
+        |p: &mut Product| p.performance.source = "A different synthetic source".into(),
+        |p: &mut Product| p.performance.period = "A different synthetic period".into(),
+    ] {
+        let mut draft = original.clone();
+        corrupt(
+            draft
+                .products
+                .iter_mut()
+                .find(|p| p.id == product(SALES_TEST_PRODUCTS[0]))
+                .unwrap(),
+        );
+        let before = draft.clone();
+        assert!(
+            matches!(draft.preview_sales_allocation(&draft.id, &request, draft.revision), PreviewResult::ValidationFailed { ref validation, .. } if has_issue(validation, ValidationCode::InvalidProductPerformance))
+        );
+        assert_eq!(draft, before);
+        assert_rejected_unchanged(
+            &mut draft,
+            ValidationCode::InvalidProductPerformance,
+            |draft| allocate_sales(draft, &request),
+        );
+    }
+    let mut draft = original;
+    draft
+        .products
+        .iter_mut()
+        .find(|p| p.id == product(SALES_TEST_PRODUCTS[0]))
+        .unwrap()
+        .dimensions
+        .width = Length::ZERO;
+    assert_rejected_unchanged(
+        &mut draft,
+        ValidationCode::InvalidProductDimensions,
+        |draft| allocate_sales(draft, &request),
+    );
+}
+
+#[test]
+fn sales_allocation_preserves_loaded_tray_presets_even_outside_loose_facing_limits() {
+    let mut draft = DraftVersion::default();
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    add(&mut draft, "jif_crunchy_16", "shelf_01");
+    let tray_before = draft.placement_views()[0].clone();
+    let mut request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    request.max_facings = 2;
+    expect_applied(allocate_sales(&mut draft, &request));
+    let tray_after = draft
+        .placement_views()
+        .into_iter()
+        .find(|p| p.id == tray_before.id)
+        .unwrap();
+    assert_eq!(
+        (
+            tray_after.facings_x,
+            tray_after.facings_y,
+            tray_after.facings_z
+        ),
+        (3, 1, 4)
+    );
+    assert_eq!(tray_after.geometry, tray_before.geometry);
+    assert_eq!(
+        tray_after.stocked_unit_count,
+        tray_before.stocked_unit_count
+    );
+    assert!(draft
+        .placements
+        .iter()
+        .filter(|p| p.product_id != tray_before.product_id)
+        .all(|p| p.facings_x <= 2));
+    assert!(draft.validate_planogram().valid);
+}
+
+#[test]
+fn sales_allocation_rejects_empty_fixed_unknown_and_tray_only_scopes_without_changes() {
+    let mut draft = DraftVersion::default();
+    let mut request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    let before = draft.clone();
+    assert!(matches!(
+        allocate_sales(&mut draft, &request),
+        CommandResult::InvalidCommand { .. }
+    ));
+    assert_eq!(draft, before);
+    request.scope = SalesAllocationScope::Shelf {
+        shelf_id: shelf("base_deck"),
+    };
+    assert_rejected_unchanged(&mut draft, ValidationCode::PlacementOnFixedShelf, |draft| {
+        allocate_sales(draft, &request)
+    });
+    for scope in [
+        SalesAllocationScope::Shelf {
+            shelf_id: shelf("missing"),
+        },
+        SalesAllocationScope::Bay {
+            section_id: SectionId::new("missing"),
+        },
+    ] {
+        request.scope = scope;
+        assert!(matches!(
+            allocate_sales(&mut draft, &request),
+            CommandResult::NotFound { .. }
+        ));
+        assert_eq!(draft, before);
+    }
+    request.scope = SalesAllocationScope::Shelf {
+        shelf_id: shelf("shelf_01"),
+    };
+    add(&mut draft, "jif_creamy_16", "shelf_01");
+    let before = draft.clone();
+    assert!(matches!(
+        allocate_sales(&mut draft, &request),
+        CommandResult::InvalidCommand { .. }
+    ));
+    assert_eq!(draft, before);
+    draft.placements[0].product_id = product("missing");
+    let before = draft.clone();
+    assert!(matches!(
+        allocate_sales(&mut draft, &request),
+        CommandResult::NotFound { .. }
+    ));
+    assert_eq!(draft, before);
+}
+
+#[test]
+fn sales_allocation_checks_version_revision_and_editability_before_any_mutation() {
+    let mut draft = sales_draft(&[(40, 1_000, 1_000), (40, 2_000, 2_000)]);
+    let request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    let before = draft.clone();
+    let version = draft.id.clone();
+    assert!(matches!(
+        draft.preview_sales_allocation(&version, &request, 0),
+        PreviewResult::RevisionConflict {
+            current_revision: 2,
+            ..
+        }
+    ));
+    assert!(matches!(
+        draft.apply_sales_allocation_as(&version, &request, 0, "test", "stale"),
+        CommandResult::RevisionConflict {
+            current_revision: 2,
+            ..
+        }
+    ));
+    let missing = VersionId::new("missing");
+    assert!(matches!(
+        draft.preview_sales_allocation(&missing, &request, 2),
+        PreviewResult::NotFound { .. }
+    ));
+    assert!(matches!(
+        draft.apply_sales_allocation_as(&missing, &request, 2, "test", "wrong version"),
+        CommandResult::NotFound { .. }
+    ));
+    assert_eq!(draft, before);
+    for status in [VersionStatus::Published, VersionStatus::Archived] {
+        draft.status = status;
+        let before = draft.clone();
+        assert!(matches!(
+            draft.preview_sales_allocation(&version, &request, 2),
+            PreviewResult::Forbidden { .. }
+        ));
+        assert!(matches!(
+            allocate_sales(&mut draft, &request),
+            CommandResult::Forbidden { .. }
+        ));
+        assert_eq!(draft, before);
+    }
+}
+
+#[test]
+fn sales_allocation_bay_scope_preserves_other_bays_assortment_and_replayable_undo() {
+    let original = cereal_draft(20_260_930, 6).unwrap();
+    for basis in [SalesAllocationBasis::Revenue, SalesAllocationBasis::Units] {
+        for target in [SalesAllocationTarget::Space, SalesAllocationTarget::Facings] {
+            let mut draft = original.clone();
+            let request = SalesAllocationRequest {
+                scope: SalesAllocationScope::Bay {
+                    section_id: SectionId::new("bay_01"),
+                },
+                basis,
+                target,
+                min_facings: 1,
+                max_facings: 24,
+            };
+            let applied = expect_applied(allocate_sales(&mut draft, &request));
+            assert_eq!(draft.revision, 1);
+            assert_eq!(draft.placements.len(), 100);
+            assert_eq!(draft.products, original.products);
+            assert_eq!(draft.fixture, original.fixture);
+            for prior in &original.placements {
+                let after = draft.placement(&prior.id).unwrap();
+                assert_eq!(
+                    (
+                        &after.product_id,
+                        &after.shelf_id,
+                        after.facings_y,
+                        after.facings_z
+                    ),
+                    (
+                        &prior.product_id,
+                        &prior.shelf_id,
+                        prior.facings_y,
+                        prior.facings_z
+                    )
+                );
+                if draft.shelf(&prior.shelf_id).unwrap().section_id != SectionId::new("bay_01") {
+                    assert_eq!(after, prior);
+                }
+            }
+            assert!(draft.validate_planogram().valid);
+            draft.validate_snapshot().unwrap();
+            let version = draft.id.clone();
+            expect_applied(draft.undo_change_set(&version, &applied.change_set.id, 1));
+            assert_eq!(draft.placements, original.placements);
+            draft.validate_snapshot().unwrap();
+        }
+    }
+}
+
+#[test]
+fn sales_allocation_deduplicates_sku_demand_and_reports_actual_aggregate_geometry() {
+    let mut draft = sales_draft(&[(40, 1_000, 1_000), (40, 1_000, 1_000)]);
+    add(&mut draft, SALES_TEST_PRODUCTS[0], "shelf_01");
+    let request = sales_request(SalesAllocationBasis::Units, SalesAllocationTarget::Facings);
+    let PreviewResult::Ready {
+        preview_scene,
+        sales_allocation: Some(report),
+        ..
+    } = draft.preview_sales_allocation(&draft.id, &request, draft.revision)
+    else {
+        panic!("expected ready allocation with report");
+    };
+    assert_eq!(report.product_count, 2);
+    assert_eq!(report.shelf_count, 1);
+    assert_eq!(report.rows.len(), 2);
+    assert_eq!(report.basis, SalesAllocationBasis::Units);
+    assert_eq!(report.target, SalesAllocationTarget::Facings);
+    assert_eq!(report.rows[0].before_facings, 2);
+    assert_eq!(report.rows[1].before_facings, 1);
+    for row in &report.rows {
+        assert_eq!(
+            row.contribution_basis_points, 5_000,
+            "A duplicated placement must not double its SKU's demand"
+        );
+        let placements = preview_scene
+            .placements
+            .iter()
+            .filter(|p| p.product_id == row.product_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            row.after_facings,
+            placements.iter().map(|p| p.facings_x).sum::<u32>()
+        );
+        assert_eq!(
+            row.after_space_sixteenths,
+            placements
+                .iter()
+                .map(|p| i64::from(p.width.sixteenths()))
+                .sum::<i64>()
+        );
+    }
+    assert!(
+        report.rows[0]
+            .after_facings
+            .abs_diff(report.rows[1].after_facings)
+            <= 1
+    );
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .map(|r| r.contribution_basis_points)
+            .sum::<u32>(),
+        10_000
+    );
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .map(|r| r.before_share_basis_points)
+            .sum::<u32>(),
+        10_000
+    );
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .map(|r| r.after_share_basis_points)
+            .sum::<u32>(),
+        10_000
+    );
+    expect_applied(allocate_sales(&mut draft, &request));
+    assert_even_blocks(&draft, "shelf_01");
+    assert!(draft.validate_planogram().valid);
+}
+
+#[test]
+fn sales_allocation_large_integer_demand_keeps_exact_deterministic_percentage_totals() {
+    let draft = sales_draft(&[
+        (40, u64::MAX, 1_000),
+        (40, u64::MAX - 1, 1_000),
+        (40, u64::MAX - 2, 1_000),
+    ]);
+    let request = sales_request(
+        SalesAllocationBasis::Revenue,
+        SalesAllocationTarget::Facings,
+    );
+    let first = draft.preview_sales_allocation(&draft.id, &request, draft.revision);
+    assert_eq!(
+        first,
+        draft.preview_sales_allocation(&draft.id, &request, draft.revision)
+    );
+    let PreviewResult::Ready {
+        sales_allocation: Some(report),
+        ..
+    } = first
+    else {
+        panic!("maximum integer demand should be safe to compare and aggregate");
+    };
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .map(|r| r.contribution_basis_points)
+            .sum::<u32>(),
+        10_000
+    );
+    assert_eq!(
+        report
+            .rows
+            .iter()
+            .map(|r| r.after_share_basis_points)
+            .sum::<u32>(),
+        10_000
+    );
+    assert!(report
+        .rows
+        .iter()
+        .all(|r| (3_333..=3_334).contains(&r.contribution_basis_points)));
+}
+
+#[test]
+fn sales_allocation_cereal_source_family_does_not_allow_unknown_or_malformed_sources() {
+    let original = cereal_draft(20_260_930, 6).unwrap();
+    let mut request = sales_request(SalesAllocationBasis::Revenue, SalesAllocationTarget::Space);
+    request.scope = SalesAllocationScope::Bay {
+        section_id: SectionId::new("bay_01"),
+    };
+    let first_id = original.placements[0].product_id.clone();
+    for suffix in ["not-a-price", "0", "-1"] {
+        let mut draft = original.clone();
+        draft
+            .products
+            .iter_mut()
+            .find(|p| p.id == first_id)
+            .unwrap()
+            .performance
+            .source = format!(
+            "{}; illustrative unit price {suffix} cents",
+            cereal_assumptions().source
+        );
+        assert_rejected_unchanged(
+            &mut draft,
+            ValidationCode::InvalidProductPerformance,
+            |draft| allocate_sales(draft, &request),
+        );
+    }
+    // Only the immutable seeded cereal scenario defines that special source
+    // convention. A standard draft cannot use it to combine unequal sources.
+    let mut ordinary = sales_draft(&[(40, 1_000, 1_000), (40, 1_000, 1_000)]);
+    for (id, price) in SALES_TEST_PRODUCTS.iter().zip([100, 200]) {
+        ordinary
+            .products
+            .iter_mut()
+            .find(|p| p.id == product(id))
+            .unwrap()
+            .performance
+            .source = format!(
+            "{}; illustrative unit price {price} cents",
+            cereal_assumptions().source
+        );
+    }
+    request.scope = SalesAllocationScope::Shelf {
+        shelf_id: shelf("shelf_01"),
+    };
+    assert_rejected_unchanged(
+        &mut ordinary,
+        ValidationCode::InvalidProductPerformance,
+        |draft| allocate_sales(draft, &request),
+    );
+}
+
+#[test]
+fn sales_allocation_infeasible_bay_minimum_changes_no_shelf_or_history() {
+    let mut draft = cereal_draft(20_260_930, 6).unwrap();
+    let request = SalesAllocationRequest {
+        scope: SalesAllocationScope::Bay {
+            section_id: SectionId::new("bay_01"),
+        },
+        basis: SalesAllocationBasis::Units,
+        target: SalesAllocationTarget::Facings,
+        min_facings: 100,
+        max_facings: 100,
+    };
+    let before = draft.clone();
+    assert!(
+        matches!(draft.preview_sales_allocation(&draft.id, &request, 0), PreviewResult::ValidationFailed { ref validation, .. } if has_issue(validation, ValidationCode::NoShelfCapacity))
+    );
+    assert_eq!(draft, before);
+    assert_rejected_unchanged(&mut draft, ValidationCode::NoShelfCapacity, |draft| {
+        allocate_sales(draft, &request)
+    });
+}

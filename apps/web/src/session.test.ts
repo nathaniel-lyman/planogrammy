@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PlanogramSession, type ProposalApprovalSource, type SessionObservers } from './session';
-import { BAY_FILE_TEXT, VERSION_ID, adjustableShelf, appliedResult, makeContext, readyPreview, reflowOperation, revisionConflict, trayPlacement } from './testFixtures';
-import type { CommandResult, EngineContext, PreviewResult, WasmEngine } from './types';
+import { BAY_FILE_TEXT, VERSION_ID, adjustableShelf, appliedResult, makeContext, readyPreview, readySalesAllocationPreview, reflowOperation, revisionConflict, salesAllocationRequest, trayPlacement } from './testFixtures';
+import type { CommandResult, EngineContext, PreviewResult, SalesAllocationRequest, WasmEngine } from './types';
 
 const operation = { kind: 'add' as const, product_id: 'jif_creamy_16', shelf_id: 'shelf_01', sequence: 0 };
 
@@ -23,9 +23,12 @@ function makeHarness(startingContext: EngineContext = makeContext()) {
     restore_bay: vi.fn(() => { context = makeContext(); return 'Peanut butter bay'; }),
     preview_changes: vi.fn((): PreviewResult => readyPreview(context.revision)),
     preview_shelf_allocation: vi.fn((): PreviewResult => readyPreview(context.revision, [reflowOperation(trayPlacement({ facings_x: 1, facings_z: 1 }), { x: 4, facings_x: 4 })])),
+    preview_sales_allocation: vi.fn((_versionId: string, request: SalesAllocationRequest): PreviewResult => readySalesAllocationPreview(context.revision, request)),
     clear_proposal_preview: vi.fn(),
     apply_changes_as: vi.fn((_versionId: string, expectedRevision: number, _operations: unknown[], actor: string, reason: string) => commit(expectedRevision, actor, reason)),
     apply_shelf_allocation_as: vi.fn((_versionId: string, _shelfId: string, _strategy: string, expectedRevision: number, actor: string, reason: string) => commit(expectedRevision, actor, reason, ['placement_0001'])),
+    apply_sales_allocation_as: vi.fn((_versionId: string, _request: SalesAllocationRequest, expectedRevision: number, actor: string, reason: string) => commit(expectedRevision, actor, reason, ['placement_0002'])),
+    add_placement_as: vi.fn((_versionId: string, _productId: string, _shelfId: string, expectedRevision: number, actor: string, reason: string) => commit(expectedRevision, actor, reason)),
   };
   const observers = {
     onContext: vi.fn(),
@@ -186,6 +189,101 @@ describe('PlanogramSession bay files', () => {
     expect(harness.session.hasPendingProposal()).toBe(false);
     expect(harness.observers.onContext).toHaveBeenLastCalledWith(makeContext());
     expect(harness.observers.onProposal).toHaveBeenLastCalledWith(undefined);
+    expect(apply(harness.session, 'proposal_0001')).toMatchObject({ status: 'not_found' });
+  });
+});
+
+describe('PlanogramSession sales allocation', () => {
+  function previewSales(harness: ReturnType<typeof makeHarness>, request = salesAllocationRequest()) {
+    return harness.session.previewSalesAllocation({ versionId: VERSION_ID, request, expectedRevision: 0, reason: 'Match the synthetic sales mix' });
+  }
+
+  it.each(['human', 'webmcp'] as const)('retains cloned semantic intent and records the %s approval actor', source => {
+    const harness = makeHarness();
+    const request = salesAllocationRequest();
+    const original = structuredClone(request);
+    const result = previewSales(harness, request);
+    expect(result).toMatchObject({ status: 'ready', proposal_id: 'proposal_0001', sales_allocation: { basis: 'revenue', target: 'facings' } });
+    expect(harness.session.context().revision).toBe(0);
+    expect(harness.observers.onProposal).toHaveBeenLastCalledWith(expect.objectContaining({
+      salesAllocation: readySalesAllocationPreview(0).sales_allocation,
+      summary: '0 additions · 0 moves · 1 facing update · 0 removals',
+    }));
+    request.scope = { kind: 'bay', section_id: 'another_section' };
+    request.basis = 'units';
+    request.max_facings = 100;
+
+    expect(apply(harness.session, 'proposal_0001', 0, source)).toMatchObject({ status: 'applied', revision: 1, change_set: { actor: source } });
+    expect(harness.apply_sales_allocation_as).toHaveBeenCalledWith(VERSION_ID, original, 0, source, 'Match the synthetic sales mix');
+    expect(harness.apply_changes_as).not.toHaveBeenCalled();
+    expect(harness.apply_shelf_allocation_as).not.toHaveBeenCalled();
+    expect(harness.session.hasPendingProposal()).toBe(false);
+    expect(apply(harness.session, 'proposal_0001', 1, source)).toMatchObject({ status: 'not_found' });
+    expect(harness.apply_sales_allocation_as).toHaveBeenCalledOnce();
+  });
+
+  it('also clones the nested scope so its shelf cannot change after preview', () => {
+    const harness = makeHarness();
+    const request = salesAllocationRequest();
+    previewSales(harness, request);
+    if (request.scope.kind === 'shelf') request.scope.shelf_id = 'shelf_02';
+    apply(harness.session, 'proposal_0001');
+    expect(harness.apply_sales_allocation_as).toHaveBeenCalledWith(VERSION_ID, salesAllocationRequest(), 0, 'human', 'Match the synthetic sales mix');
+  });
+
+  it('discards sales previews on cancellation, replacement and committed edits', () => {
+    const harness = makeHarness();
+    previewSales(harness);
+    expect(harness.session.rejectProposal('proposal_0001')).toBe(true);
+    expect(harness.session.context().revision).toBe(0);
+    expect(harness.session.rejectProposal('proposal_0001')).toBe(false);
+    expect(apply(harness.session, 'proposal_0001')).toMatchObject({ status: 'not_found' });
+
+    previewSales(harness);
+    preview(harness.session, 'Replacement');
+    expect(apply(harness.session, 'proposal_0002')).toMatchObject({ status: 'not_found' });
+    previewSales(harness);
+    harness.session.addPlacement({ versionId: VERSION_ID, productId: 'jif_creamy_16', shelfId: 'shelf_01', expectedRevision: 0 }, 'webmcp');
+    expect(harness.session.hasPendingProposal()).toBe(false);
+    expect(apply(harness.session, 'proposal_0004', 1)).toMatchObject({ status: 'not_found' });
+    expect(harness.apply_sales_allocation_as).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 'validation_failed', revision: 0, validation: { issues: [{ code: 'sales_data', message: 'No positive synthetic contribution.' }] } },
+    { status: 'invalid_command', message: 'Infeasible facing bounds.' },
+    { status: 'forbidden', message: 'Baseline is immutable.' },
+  ] satisfies PreviewResult[])('does not retain a rejected preview: $status', rejection => {
+    const harness = makeHarness();
+    previewSales(harness);
+    harness.preview_sales_allocation.mockReturnValueOnce(rejection);
+    expect(previewSales(harness)).toEqual(rejection);
+    expect(harness.session.hasPendingProposal()).toBe(false);
+    expect(harness.session.context().revision).toBe(0);
+    expect(harness.apply_sales_allocation_as).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { changed: { version_id: 'cereal_alternative_2' }, status: 'not_found' },
+    { changed: { document_revision: 1 }, status: 'invalid_command' },
+    { changed: { revision: 1 }, status: 'revision_conflict' },
+  ])('blocks stale approval when document context changes ($status)', ({ changed, status }) => {
+    const harness = makeHarness();
+    previewSales(harness);
+    harness.context.mockReturnValue(makeContext(changed));
+    expect(apply(harness.session, 'proposal_0001')).toMatchObject({ status });
+    expect(harness.session.hasPendingProposal()).toBe(false);
+    expect(harness.apply_sales_allocation_as).not.toHaveBeenCalled();
+  });
+
+  it('exports committed state without approving sales allocation and invalidates it on successful open', () => {
+    const harness = makeHarness();
+    previewSales(harness);
+    expect(harness.session.exportBay('Sales allocation')).toBe(BAY_FILE_TEXT);
+    expect(harness.session.hasPendingProposal()).toBe(true);
+    expect(harness.apply_sales_allocation_as).not.toHaveBeenCalled();
+    harness.session.restoreBay(BAY_FILE_TEXT, 0);
+    expect(harness.session.hasPendingProposal()).toBe(false);
     expect(apply(harness.session, 'proposal_0001')).toMatchObject({ status: 'not_found' });
   });
 });

@@ -1,4 +1,4 @@
-import type { CommandResult, EngineContext, Placement, PreviewResult, Product, Shelf } from './types';
+import type { CommandResult, EngineContext, Placement, PreviewResult, Product, SalesAllocationRequest, Shelf } from './types';
 
 // Shared Vitest data mirroring the Rust-owned representative catalog and fixture.
 // Tests use these transport shapes as canned Wasm responses; they never replace Rust geometry.
@@ -132,6 +132,33 @@ export function readyPreview(revision: number, operations: unknown[] = [{ type: 
     affected_ids: [],
     validation: { issues: [] },
     preview_scene: { revision, fixture_id: 'fixture_standard_4ft', width: 768, height: 1344, shelves: [], placements: [] },
+  };
+}
+
+export function salesAllocationRequest(overrides: Partial<SalesAllocationRequest> = {}): SalesAllocationRequest {
+  return { scope: { kind: 'shelf', shelf_id: 'shelf_01' }, basis: 'revenue', target: 'facings', min_facings: 1, max_facings: 6, ...overrides };
+}
+
+/** Canned Rust report: a fixed tray and a loose SKU with equal synthetic demand. */
+export function readySalesAllocationPreview(revision: number, request = salesAllocationRequest()): Extract<PreviewResult, { status: 'ready' }> {
+  return {
+    ...readyPreview(revision, [reflowOperation(loosePlacement(), { x: 300, facings_x: 3 })]),
+    sales_allocation: {
+      scope: { ...request.scope },
+      basis: request.basis,
+      target: request.target,
+      product_count: 2,
+      shelf_count: 1,
+      fixed_tray_count: 1,
+      zero_weight_sku_count: 0,
+      period: 'Trailing 13 weeks',
+      source: PERFORMANCE_SOURCE,
+      rows: [
+        { product_id: trayProduct.id, contribution_basis_points: 5000, before_facings: 3, after_facings: 3, before_space_sixteenths: 175, after_space_sixteenths: 175, before_share_basis_points: 7500, after_share_basis_points: 5000 },
+        { product_id: looseProduct.id, contribution_basis_points: 5000, before_facings: 1, after_facings: 3, before_space_sixteenths: 57, after_space_sixteenths: 171, before_share_basis_points: 2500, after_share_basis_points: 5000 },
+      ],
+      warnings: ['Synthetic inputs describe allocation, not a forecast of sales uplift.'],
+    },
   };
 }
 

@@ -1,5 +1,6 @@
 import { ScenarioPanel } from './ScenarioPanel';
 import { BayFiles } from './BayFiles';
+import { DEFAULT_SALES_ALLOCATION_OPTIONS, focusWithinInspector, SalesAllocation, SalesAllocationReview } from './SalesAllocation';
 import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
 import { CheckCircle2, Focus, Minus, Package, PackagePlus, Plus, RotateCcw, Search, Sparkles, Trash2, Undo2, X, XCircle } from 'lucide-react';
 import { resultError, type FacingsSource, type MoveSource, type PlacementSource, type RemovalSource } from './commands';
@@ -8,7 +9,7 @@ import { searchProducts } from './queries';
 import { PlanogramSession, type ProposalApprovalSource, type SessionProposal } from './session';
 import { useUiStore } from './store';
 import { registerPlanogramWebMcp } from './webmcp';
-import type { ChangeSet, CommandResult, FacingsRequest, Placement, Product, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
+import type { ChangeSet, CommandResult, FacingsRequest, Placement, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
 
 const CANVAS_ID = 'planogram-canvas';
 const SHELF_READY_TRAY_LABEL = 'Shelf-ready tray';
@@ -142,6 +143,7 @@ function ProposalReview({
   products,
   placements,
   revisionRequested,
+  error,
   onAccept,
   onRevise,
   onReject,
@@ -150,13 +152,19 @@ function ProposalReview({
   products: Product[];
   placements: Placement[];
   revisionRequested: boolean;
+  error?: string;
   onAccept: () => void;
   onRevise: () => void;
   onReject: () => void;
 }) {
-  return <aside className="proposal-review" aria-labelledby="proposal-review-heading">
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { focusWithinInspector(headingRef.current, true); }, [proposal.id]);
+  useEffect(() => { if (error) focusWithinInspector(errorRef.current); }, [error]);
+  const operations = <ol>{proposal.operations.map((operation, index) => <li key={`${proposal.id}-${index}`}><span className="operation-number">{index + 1}</span><p><strong>{proposalOperationLabel(operation, products, placements)}</strong>{proposalOperationMeta(operation, products) && <small>{proposalOperationMeta(operation, products)}</small>}</p></li>)}</ol>;
+  return <aside className={`proposal-review ${proposal.salesAllocation ? 'sales-proposal-review' : ''}`} aria-labelledby="proposal-review-heading">
     <div className="proposal-review-header">
-      <div><span className="section-label">Pending change set</span><h1 id="proposal-review-heading">Proposal review</h1></div>
+      <div><span className="section-label">Pending change set</span><h1 id="proposal-review-heading" ref={headingRef} tabIndex={-1}>Proposal review</h1></div>
       <button className="proposal-close" type="button" onClick={onReject} aria-label="Dismiss proposal"><X size={18}/></button>
     </div>
 
@@ -171,6 +179,8 @@ function ProposalReview({
       <div className="constraint-pass" role="status"><CheckCircle2 size={17}/><span>All constraints pass</span></div>
     </section>
 
+    {proposal.salesAllocation && <SalesAllocationReview report={proposal.salesAllocation} products={products}/>}
+
     <section className="proposal-impact">
       <span className="section-label">Impact</span>
       <dl>
@@ -180,17 +190,21 @@ function ProposalReview({
       </dl>
     </section>
 
-    <section className="proposal-operations">
+    {proposal.salesAllocation ? <details className="proposal-operations proposal-operations-details">
+      <summary>Resolved operations <span>{proposal.operationCount}</span></summary>
+      {operations}
+    </details> : <section className="proposal-operations">
       <div className="proposal-operations-heading"><div><span className="section-label">Resolved operations</span><h2>What will change</h2></div><span>{proposal.operationCount}</span></div>
-      <ol>{proposal.operations.map((operation, index) => <li key={`${proposal.id}-${index}`}><span className="operation-number">{index + 1}</span><p><strong>{proposalOperationLabel(operation, products, placements)}</strong>{proposalOperationMeta(operation, products) && <small>{proposalOperationMeta(operation, products)}</small>}</p></li>)}</ol>
-    </section>
+      {operations}
+    </section>}
 
     {revisionRequested && <div className="revision-note" role="status"><RotateCcw size={16}/><p><strong>Revision requested</strong><span>The proposal remains unchanged and uncommitted while you refine the brief with ChatGPT.</span></p></div>}
 
     <div className="proposal-actions">
+      {error && <p ref={errorRef} className="error" role="alert" tabIndex={-1}>{error}</p>}
       <button className="accept-proposal" type="button" onClick={onAccept}><CheckCircle2 size={17}/>Accept proposal</button>
-      <div><button type="button" onClick={onRevise}><RotateCcw size={16}/>Revise</button><button type="button" onClick={onReject}><XCircle size={16}/>Reject</button></div>
-      <p>Accept records one atomic change set at revision {proposal.revision}.</p>
+      <div><button type="button" onClick={onRevise}><RotateCcw size={16}/>{proposal.salesAllocation ? 'Adjust allocation' : 'Revise'}</button><button type="button" onClick={onReject}><XCircle size={16}/>Reject</button></div>
+      <p>{proposal.salesAllocation ? 'Accept applies one change set. Undo restores the previous layout.' : `Accept records one atomic change set at revision ${proposal.revision}.`}</p>
     </div>
   </aside>;
 }
@@ -198,16 +212,20 @@ function ProposalReview({
 function AppliedProposalReceipt({
   changeSet,
   headingRef,
+  salesAllocation,
 }: {
   changeSet: ChangeSet;
   headingRef: Ref<HTMLHeadingElement>;
+  salesAllocation?: boolean;
 }) {
   const operationCount = changeSet.operations.length;
+  const title = salesAllocation ? 'Sales allocation applied' : 'WebMCP proposal approved';
   return <section className="applied-proposal-receipt" aria-labelledby="applied-proposal-heading">
-    <p className="sr-only" role="status">WebMCP proposal approved by {changeSet.actor}. {changeSet.reason}. Revision {changeSet.base_revision} to {changeSet.resulting_revision}. Change set {changeSet.id}.</p>
+    <p className="sr-only" role="status">{title} by {changeSet.actor}. {changeSet.reason}. Revision {changeSet.base_revision} to {changeSet.resulting_revision}. Change set {changeSet.id}.</p>
     <div className="applied-proposal-kicker"><CheckCircle2 size={16}/><span>Approved change set</span></div>
-    <h2 id="applied-proposal-heading" ref={headingRef} tabIndex={-1}>WebMCP proposal approved</h2>
+    <h2 id="applied-proposal-heading" ref={headingRef} tabIndex={-1}>{title}</h2>
     <p>{changeSet.reason}</p>
+    {salesAllocation && <p>Undo restores the previous layout. Synthetic demand is unchanged.</p>}
     <dl>
       <div><dt>Actor</dt><dd>{changeSet.actor}</dd></div>
       <div><dt>Revision</dt><dd>{changeSet.base_revision} → {changeSet.resulting_revision}</dd></div>
@@ -244,12 +262,17 @@ export function App() {
   const [selectedProductId, setSelectedProductId] = useState<string>();
   const [webmcpStatus, setWebmcpStatus] = useState<'loading' | 'ready' | 'unsupported' | 'error'>('loading');
   const [proposal, setProposal] = useState<SessionProposal>();
-  const [appliedProposal, setAppliedProposal] = useState<{ changeSet: ChangeSet; source: ProposalApprovalSource }>();
+  const [appliedProposal, setAppliedProposal] = useState<{ changeSet: ChangeSet; source: ProposalApprovalSource; salesAllocation: boolean }>();
   const [revisionRequested, setRevisionRequested] = useState(false);
+  const [proposalError, setProposalError] = useState<string>();
+  const [salesOptions, setSalesOptions] = useState(DEFAULT_SALES_ALLOCATION_OPTIONS);
   const appliedProposalHeadingRef = useRef<HTMLHeadingElement>(null);
+  const salesPreviewButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreSalesFocusRef = useRef(false);
+  const salesProposalRef = useRef(false);
 
   const [activeBay,setActiveBay]=useState('');
-  const resetView = () => {setShelfFeedback(undefined);setProductQuery('');setBrandFilter('All brands');setStockingFilter('all');setSelectedProductId(undefined);setActiveBay('');selectStore(undefined);setAppliedProposal(undefined);setRevisionRequested(false);setCommand('idle');setZoomLabel(100);interactionRef.current=undefined;};
+  const resetView = () => {setShelfFeedback(undefined);setProductQuery('');setBrandFilter('All brands');setStockingFilter('all');setSelectedProductId(undefined);setActiveBay('');selectStore(undefined);setAppliedProposal(undefined);setRevisionRequested(false);setProposalError(undefined);setSalesOptions(DEFAULT_SALES_ALLOCATION_OPTIONS);setCommand('idle');setZoomLabel(100);interactionRef.current=undefined;};
   const shelves = useMemo(() => context ? allShelves(context) : [], [context]);
   const products = context?.products ?? [];
   const selectedShelf = selection?.kind === 'shelf' ? shelves.find(shelf => shelf.id === selection.id) : undefined;
@@ -274,6 +297,7 @@ export function App() {
 
   const handleCommand = useCallback((result: CommandResult) => {
     setShelfFeedback(undefined);
+    if (result.status === 'applied') setAppliedProposal(undefined);
     const message = statusError(result);
     setCommand(message ? 'rejected' : 'applied', message);
   }, [setCommand]);
@@ -413,9 +437,13 @@ export function App() {
           onCommand: handleCommand,
           onProposal: next => {
             setProposal(next);
-            if (next) setAppliedProposal(undefined);
+            setProposalError(undefined);
+            if (next) {
+              setAppliedProposal(undefined);
+              salesProposalRef.current = !!next.salesAllocation;
+            }
           },
-          onProposalApplied: (result, source) => setAppliedProposal({ changeSet: result.change_set, source }),
+          onProposalApplied: (result, source) => setAppliedProposal({ changeSet: result.change_set, source, salesAllocation: salesProposalRef.current }),
         });
         sessionRef.current = session;
         await engine.initialize_renderer(CANVAS_ID);
@@ -466,7 +494,14 @@ export function App() {
   useEffect(() => setRevisionRequested(false), [proposal?.id]);
 
   useEffect(() => {
-    if (appliedProposal?.source === 'human') appliedProposalHeadingRef.current?.focus();
+    if (!proposal && restoreSalesFocusRef.current) {
+      restoreSalesFocusRef.current = false;
+      focusWithinInspector(salesPreviewButtonRef.current);
+    }
+  }, [proposal]);
+
+  useEffect(() => {
+    if (appliedProposal?.source === 'human') focusWithinInspector(appliedProposalHeadingRef.current, true);
   }, [appliedProposal?.changeSet.id, appliedProposal?.source]);
 
   const pointerPosition = (event: React.PointerEvent | React.DragEvent) => {
@@ -533,13 +568,49 @@ export function App() {
     const session = sessionRef.current;
     const current = useUiStore.getState().context;
     if (!session || !current || !proposal) return;
+    setProposalError(undefined);
     setCommand('working');
-    session.applyChanges({ versionId: current.version_id, proposalId: proposal.id, expectedRevision: current.revision }, 'human');
+    try {
+      const result = session.applyChanges({ versionId: current.version_id, proposalId: proposal.id, expectedRevision: current.revision }, 'human');
+      const message = statusError(result);
+      if (message) {
+        setProposalError(message);
+        setCommand('rejected', message);
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setProposalError(message);
+      setCommand('rejected', message);
+    }
   };
 
   const rejectProposal = () => {
+    restoreSalesFocusRef.current = !!proposal?.salesAllocation;
     if (!proposal || !sessionRef.current?.rejectProposal(proposal.id)) return;
     setCommand('idle');
+  };
+
+  const previewSalesAllocation = (request: SalesAllocationRequest): string | undefined => {
+    const session = sessionRef.current;
+    const current = useUiStore.getState().context;
+    if (!session || !current) return 'The editor is still loading. Try again when the fixture is ready.';
+    setCommand('working');
+    setAppliedProposal(undefined);
+    setProposalError(undefined);
+    try {
+      const result = session.previewSalesAllocation({
+        versionId: current.version_id,
+        expectedRevision: current.revision,
+        request,
+        reason: `Allocate ${request.scope.kind === 'bay' ? 'bay' : 'shelf'} ${request.target === 'space' ? 'space' : 'facings'} by synthetic ${request.basis === 'revenue' ? 'revenue' : 'unit'} contribution; ${request.min_facings}–${request.max_facings} facings per loose placement`,
+      });
+      if (result.status === 'ready') { setCommand('idle'); return; }
+      setCommand('rejected');
+      return resultError(result) ?? 'The allocation could not be previewed.';
+    } catch (cause) {
+      setCommand('rejected');
+      return cause instanceof Error ? cause.message : String(cause);
+    }
   };
 
   const submitElevation = (event: React.FormEvent) => {
@@ -592,6 +663,17 @@ export function App() {
     if (!selectedShelf || selectedShelf.kind !== 'adjustable' || selectedShelfPlacementCount === 0) return;
     issueDistribution(selectedShelf, shelfDistribution);
   };
+
+  const salesAllocationControls = context && targetShelf ? <SalesAllocation
+    key={`${context.version_id}-${targetShelf.id}`}
+    context={context}
+    shelf={targetShelf}
+    options={salesOptions}
+    onOptionsChange={setSalesOptions}
+    onPreview={previewSalesAllocation}
+    onInvalid={() => setCommand('rejected')}
+    previewButtonRef={salesPreviewButtonRef}
+  /> : undefined;
 
   if (unsupported) return <main className="unsupported"><div><h1>WebGPU is required</h1><p>Planogrammy could not initialize its Rust WebGPU renderer.</p><code>{unsupported}</code></div></main>;
 
@@ -668,13 +750,14 @@ export function App() {
           {proposal && <div className="proposal-legend" aria-label="Proposal preview legend"><span><Package size={13}/>Current placement</span><span><PackagePlus size={13}/>Proposed position</span></div>}
         </div>
 
-        {proposal ? <ProposalReview proposal={proposal} products={products} placements={context?.placements ?? []} revisionRequested={revisionRequested} onAccept={acceptProposal} onRevise={() => setRevisionRequested(true)} onReject={rejectProposal}/> : <aside className="inspector" aria-label="Selection inspector">
-          {appliedProposal && <AppliedProposalReceipt changeSet={appliedProposal.changeSet} headingRef={appliedProposalHeadingRef}/>}
+        {proposal ? <ProposalReview proposal={proposal} products={products} placements={context?.placements ?? []} revisionRequested={revisionRequested} error={proposalError} onAccept={acceptProposal} onRevise={proposal.salesAllocation ? rejectProposal : () => setRevisionRequested(true)} onReject={rejectProposal}/> : <aside className="inspector" aria-label="Selection inspector">
+          {appliedProposal && <AppliedProposalReceipt changeSet={appliedProposal.changeSet} headingRef={appliedProposalHeadingRef} salesAllocation={appliedProposal.salesAllocation}/>}
           <fieldset disabled={context?.version_status === 'published'} className="inspector-section selection-panel">{context?.version_status==='published' && <p className="baseline-note">Locked eight-bay baseline. Switch to a six-bay alternative to edit.</p>}
             <span className="section-label">Selection</span>
             {selectedShelf ? <>
               <h1>{selectedShelf.kind === 'base_deck' ? 'Base deck' : shelfLabel(selectedShelf.id)}</h1>
               <dl><div><dt>ID</dt><dd>{selectedShelf.id}</dd></div><div><dt>Kind</dt><dd>{selectedShelf.kind === 'base_deck' ? 'Base deck' : 'Adjustable'}</dd></div><div><dt>Depth</dt><dd>{formatImperial(selectedShelf.depth)}</dd></div><div><dt>Elevation</dt><dd>{formatImperial(selectedShelf.elevation)}</dd></div></dl>
+              {salesAllocationControls}
               <form onSubmit={submitElevation} className="elevation-form">
                 <label htmlFor="elevation">Elevation</label>
                 <div className="field-row"><input id="elevation" value={elevationInput} onChange={event => setElevationInput(event.target.value)} disabled={selectedShelf.kind === 'base_deck'} aria-invalid={!!elevationError} aria-describedby={elevationError ? 'elevation-help elevation-error' : 'elevation-help'}/><button disabled={selectedShelf.kind === 'base_deck'}>Apply</button></div>
@@ -698,6 +781,7 @@ export function App() {
             </> : selectedPlacement && selectedPlacementProduct ? <>
               <h1>{selectedPlacementProduct.brand} {selectedPlacementProduct.description}</h1>
               <span className={`stocking-badge ${selectedPlacement.stocking_mode}`}>{selectedPlacement.stocking_mode === 'tray' ? SHELF_READY_TRAY_LABEL : 'Loose stocked'}</span>
+              {salesAllocationControls}
               <h2 className="inspector-subheading">Placement</h2>
               <dl>
                 <div><dt>ID</dt><dd>{selectedPlacement.id}</dd></div>

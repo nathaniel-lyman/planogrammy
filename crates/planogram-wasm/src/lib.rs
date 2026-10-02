@@ -5,7 +5,8 @@ mod golden;
 use document::EditorDocument;
 use planogram_core::{
     ChangeSetId, CommandResult, DraftVersion, FacingsRequest, Length, PlacementChange, PlacementId,
-    ProductId, ShelfAllocationStrategy, ShelfDistribution, ShelfId, VersionId,
+    ProductId, SalesAllocationRequest, ShelfAllocationStrategy, ShelfDistribution, ShelfId,
+    VersionId,
 };
 use planogram_render::{Selection, WebGpuRenderer};
 use serde::{Deserialize, Serialize};
@@ -518,6 +519,37 @@ impl PlanogramEngine {
         }
     }
 
+    pub fn preview_sales_allocation(
+        &mut self,
+        version_id: String,
+        request: JsValue,
+        expected_revision: u32,
+    ) -> Result<JsValue, JsValue> {
+        let request: SalesAllocationRequest =
+            serde_wasm_bindgen::from_value(request).map_err(|error| {
+                JsValue::from_str(&format!("Invalid sales allocation request: {error}"))
+            })?;
+        let result = self.document.draft().preview_sales_allocation(
+            &VersionId::new(version_id),
+            &request,
+            u64::from(expected_revision),
+        );
+        if let Some(renderer) = self.renderer.as_mut() {
+            match &result {
+                planogram_core::PreviewResult::Ready {
+                    preview_scene,
+                    affected_ids,
+                    ..
+                } => renderer
+                    .model
+                    .show_proposal_preview((**preview_scene).clone(), affected_ids.clone()),
+                _ => renderer.model.clear_proposal_preview(),
+            }
+            let _ = renderer.render();
+        }
+        to_js(&result)
+    }
+
     pub fn apply_changes_as(
         &mut self,
         version_id: String,
@@ -560,6 +592,29 @@ impl PlanogramEngine {
                 message: format!("Unknown shelf allocation strategy: {strategy}."),
             },
         };
+        self.apply_result_to_renderer(&result);
+        to_js(&result)
+    }
+
+    pub fn apply_sales_allocation_as(
+        &mut self,
+        version_id: String,
+        request: JsValue,
+        expected_revision: u32,
+        actor: String,
+        reason: String,
+    ) -> Result<JsValue, JsValue> {
+        let request: SalesAllocationRequest =
+            serde_wasm_bindgen::from_value(request).map_err(|error| {
+                JsValue::from_str(&format!("Invalid sales allocation request: {error}"))
+            })?;
+        let result = self.document.draft_mut().apply_sales_allocation_as(
+            &VersionId::new(version_id),
+            &request,
+            u64::from(expected_revision),
+            actor,
+            reason,
+        );
         self.apply_result_to_renderer(&result);
         to_js(&result)
     }
