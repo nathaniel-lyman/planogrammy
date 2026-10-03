@@ -36,6 +36,7 @@ export interface EngineContext {
   fixture: Fixture;
   products: Product[];
   placements: Placement[];
+  sku_supply: SkuSupply[];
   latest_change_set_id?: string;
   latest_undoable_change_set_id?: string;
 }
@@ -114,6 +115,17 @@ export interface PlacementSceneNode {
 
 export type PackageShape = 'jar' | 'box';
 
+export type SupplyBand = 'under_three_days' | 'under_seven_days' | 'under_fourteen_days' | 'fourteen_days_or_more' | 'no_demand';
+
+/** Rust-derived shelf stock of one placed SKU, summed over its placements, against assumed weekly demand. */
+export interface SkuSupply {
+  product_id: string;
+  stocked_units: number;
+  weekly_demand_milliunits: number;
+  days_supply_millidays: number | null;
+  band: SupplyBand;
+}
+
 /** Screen rectangle (CSS px) of one placement, derived by the renderer for the label overlay. */
 export interface PlacementLabel {
   id: string;
@@ -131,6 +143,7 @@ export interface RenderScene {
   height: number;
   shelves: Array<{ id: string; kind: ShelfKind; width: number; depth: number; elevation: number }>;
   placements: PlacementSceneNode[];
+  sku_supply: SkuSupply[];
 }
 
 /** Requested facing counts; an omitted count keeps the placement's current value in Rust. */
@@ -270,6 +283,7 @@ export interface WasmEngine {
   zoom_by(factor: number): void;
   pan_by(dx: number, dy: number): void;
   fit_fixture(): void;
+  set_supply_overlay(enabled: boolean): void;
 }
 
 export interface ScenarioMetrics {

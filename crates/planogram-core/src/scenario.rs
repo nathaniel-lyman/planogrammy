@@ -310,8 +310,8 @@ pub fn compare_cereal(baseline: &DraftVersion, current: &DraftVersion) -> Scenar
     for product in current.products.iter().chain(&baseline.products) {
         catalog.insert(product.id.clone(), product);
     }
-    let baseline_capacity = capacity_by_product(baseline);
-    let current_capacity = capacity_by_product(current);
+    let baseline_capacity = baseline.stocked_units_by_product();
+    let current_capacity = current.stocked_units_by_product();
     let products = catalog
         .values()
         .map(|product| {
@@ -335,23 +335,6 @@ pub fn compare_cereal(baseline: &DraftVersion, current: &DraftVersion) -> Scenar
         current: metrics(current, &catalog, &current_capacity),
         products,
     }
-}
-
-fn capacity_by_product(draft: &DraftVersion) -> BTreeMap<ProductId, u64> {
-    let mut capacities = BTreeMap::new();
-    for view in draft.placement_views() {
-        *capacities.entry(view.product_id).or_default() += u64::from(view.stocked_unit_count);
-    }
-    capacities
-}
-
-fn days_supply(capacity: u64, demand_milliunits: u64) -> Option<u64> {
-    (demand_milliunits > 0)
-        .then(|| narrow(u128::from(capacity) * 7_000_000 / u128::from(demand_milliunits)))
-}
-
-fn narrow(value: u128) -> u64 {
-    value.min(u128::from(u64::MAX)) as u64
 }
 
 fn metrics(

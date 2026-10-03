@@ -9,7 +9,7 @@ import { searchProducts } from './queries';
 import { PlanogramSession, type ProposalApprovalSource, type SessionProposal } from './session';
 import { useUiStore } from './store';
 import { registerPlanogramWebMcp } from './webmcp';
-import type { ChangeSet, CommandResult, FacingsRequest, Placement, PlacementLabel, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, StockingMode, WasmEngine } from './types';
+import type { ChangeSet, CommandResult, FacingsRequest, Placement, PlacementLabel, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, SkuSupply, StockingMode, SupplyBand, WasmEngine } from './types';
 
 const CANVAS_ID = 'planogram-canvas';
 const SHELF_READY_TRAY_LABEL = 'Shelf-ready tray';
@@ -55,6 +55,19 @@ function formatUnitsPerStoreWeek(product: Product) {
 
 function formatGrossMargin(product: Product) {
   return `${compactNumber.format(product.performance.gross_margin_basis_points / 100)}%`;
+}
+
+const SUPPLY_BANDS: Array<{ band: SupplyBand; label: string }> = [
+  { band: 'under_three_days', label: 'Under 3 days' },
+  { band: 'under_seven_days', label: '3–7 days' },
+  { band: 'under_fourteen_days', label: '7–14 days' },
+  { band: 'fourteen_days_or_more', label: '14+ days' },
+  { band: 'no_demand', label: 'No assumed demand' },
+];
+
+function formatDaysSupply(supply: SkuSupply | undefined) {
+  if (!supply) return 'Not on shelf';
+  return supply.days_supply_millidays === null ? 'No assumed demand' : `${(supply.days_supply_millidays / 1000).toFixed(1)} days`;
 }
 
 function placementStockingLabel(placement: Placement) {
@@ -270,6 +283,8 @@ export function App() {
   const [shelfDistribution, setShelfDistribution] = useState<ShelfDistribution>('space_evenly');
   const [zoomLabel, setZoomLabel] = useState(100);
   const [labels, setLabels] = useState<PlacementLabel[]>([]);
+  const [supplyOverlay, setSupplyOverlay] = useState(false);
+  const supplyOverlayRef = useRef(supplyOverlay);
   const [interacting, setInteracting] = useState(false);
   const [productQuery, setProductQuery] = useState('');
   const [brandFilter, setBrandFilter] = useState('All brands');
@@ -295,6 +310,12 @@ export function App() {
   const distributionError = shelfFeedback?.shelfId === selectedShelf?.id && shelfFeedback?.control === 'distribution' ? shelfFeedback.message : undefined;
   const selectedPlacement = selection?.kind === 'placement' ? context?.placements.find(placement => placement.id === selection.id) : undefined;
   const selectedPlacementProduct = products.find(product => product.id === selectedPlacement?.product_id);
+  const supplyByProduct = useMemo(() => new Map((context?.sku_supply ?? []).map(supply => [supply.product_id, supply])), [context]);
+  const selectedSupply = selectedPlacement ? supplyByProduct.get(selectedPlacement.product_id) : undefined;
+  const supplyLegend = useMemo(() => SUPPLY_BANDS
+    .map(({ band, label }) => ({ band, label, count: (context?.sku_supply ?? []).filter(supply => supply.band === band).length }))
+    .filter(entry => entry.band !== 'no_demand' || entry.count > 0), [context]);
+  const showSupplyOverlay = (enabled: boolean) => { setSupplyOverlay(enabled); supplyOverlayRef.current = enabled; sessionRef.current?.engine.set_supply_overlay(enabled); };
   const selectedShelfPlacementCount = selectedShelf
     ? context?.placements.filter(placement => placement.shelf_id === selectedShelf.id).length ?? 0
     : 0;
@@ -472,6 +493,7 @@ export function App() {
         sessionRef.current = session;
         await engine.initialize_renderer(CANVAS_ID);
         if (cancelled) return;
+        engine.set_supply_overlay(supplyOverlayRef.current);
         session.refresh();
         const registration = await registerPlanogramWebMcp(session, () => useUiStore.getState().selection);
         if (cancelled) {
@@ -770,7 +792,7 @@ export function App() {
           <div className="catalog-action"><button onClick={() => selectedProduct && issuePlacement(selectedProduct.id, targetShelfId, 'catalog_button')} disabled={!selectedProduct || !canAddToTargetShelf}><PackagePlus size={16}/><span>{selectedProduct?.tray ? 'Add tray to selected shelf' : 'Add to selected shelf'}<small>{selectedProduct ? selectedProduct.tray ? `${SHELF_READY_TRAY_LABEL} · ${selectedProduct.tray.facings_x} facings × ${selectedProduct.tray.units_deep} deep` : `${selectedProduct.brand} ${selectedProduct.size_oz} · loose` : 'Choose a product'}</small></span></button><p>Double-click or drag a product onto a shelf. Tray presets resolve in Rust.</p></div>
         </aside>
         <div className="canvas-region">
-          <div className="canvas-heading"><div><span>Front elevation</span><strong>{context?.scenario?'Cereal category':'Section 01'}</strong></div>{context?.scenario && <select aria-label="Focus bay" value={activeBay} onChange={e=>{const id=e.target.value;setActiveBay(id);if(id){const shelf=context.fixture.sections.find(s=>s.id===id)?.shelves[0];if(shelf){sessionRef.current?.engine.focus_bay(shelf.id);refreshLabels();}}else fitFixture();}}><option value="">All bays</option>{context.fixture.sections.map((section,i)=><option key={section.id} value={section.id}>Bay {String(i+1).padStart(2,'0')}</option>)}</select>}<div className="dimensions">{context && `${formatImperial(context.fixture.width)} W × ${formatImperial(context.fixture.height)} H`}</div></div>
+          <div className="canvas-heading"><div><span>Front elevation{context && <span className="heading-dimensions">{` · ${formatImperial(context.fixture.width)} W × ${formatImperial(context.fixture.height)} H`}</span>}</span><strong>{context?.scenario?'Cereal category':'Section 01'}</strong></div>{context?.scenario && <select aria-label="Focus bay" value={activeBay} onChange={e=>{const id=e.target.value;setActiveBay(id);if(id){const shelf=context.fixture.sections.find(s=>s.id===id)?.shelves[0];if(shelf){sessionRef.current?.engine.focus_bay(shelf.id);refreshLabels();}}else fitFixture();}}><option value="">All bays</option>{context.fixture.sections.map((section,i)=><option key={section.id} value={section.id}>Bay {String(i+1).padStart(2,'0')}</option>)}</select>}<div className="color-mode" role="group" aria-label="Color products by"><button type="button" aria-pressed={!supplyOverlay} onClick={() => showSupplyOverlay(false)}>Brand</button><button type="button" aria-pressed={supplyOverlay} onClick={() => showSupplyOverlay(true)}>Days of supply</button></div></div>
           <canvas
             ref={canvasRef}
             id={CANVAS_ID}
@@ -789,10 +811,12 @@ export function App() {
             {labels.map(label => {
               const product = products.find(candidate => candidate.id === label.product_id);
               if (!product) return null;
-              return <div key={label.id} className="placement-label" style={{ left: label.x, top: label.y, maxWidth: label.width }}><strong>{product.brand}</strong><span>{productVariant(product)} · {product.size_oz}</span></div>;
+              const supply = supplyByProduct.get(label.product_id);
+              return <div key={label.id} className={supplyOverlay && supply ? `placement-label supply ${supply.band}` : 'placement-label'} style={{ left: label.x, top: label.y, maxWidth: label.width }}>{supplyOverlay ? <><strong>{formatDaysSupply(supply)}</strong><span>{product.brand} · {product.size_oz}</span></> : <><strong>{product.brand}</strong><span>{productVariant(product)} · {product.size_oz}</span></>}</div>;
             })}
           </div>
-          {!proposal && <div className="canvas-help">Select products or shelves · Arrows move selected products 1/8" · + / − change facings · Drag shelves at 1" · Scroll to zoom</div>}
+          {!proposal && supplyOverlay && <div className="supply-legend" aria-label="Days of supply legend">{context?.sku_supply.length === 0 ? <ul><li>Add products to see their days of supply</li></ul> : <ul>{supplyLegend.map(entry => <li key={entry.band}><i className={`supply-swatch ${entry.band}`} aria-hidden="true"/>{entry.label}<b>{entry.count} {entry.count === 1 ? 'SKU' : 'SKUs'}</b></li>)}</ul>}<small>Simulated: shelf units × 7 ÷ assumed weekly units, per SKU</small></div>}
+          {!proposal && !supplyOverlay && <div className="canvas-help">Select products or shelves · Arrows move selected products 1/8" · + / − change facings · Drag shelves at 1" · Scroll to zoom</div>}
           {proposal && <div className="proposal-legend" aria-label="Proposal preview legend"><span><Package size={13}/>Current placement</span><span><PackagePlus size={13}/>Proposed position</span></div>}
         </div>
 
@@ -858,6 +882,7 @@ export function App() {
                 <div><dt>Sales / store / week</dt><dd>{formatSalesPerStoreWeek(selectedPlacementProduct)}</dd></div>
                 <div><dt>Units / store / week</dt><dd>{formatUnitsPerStoreWeek(selectedPlacementProduct)}</dd></div>
                 <div><dt>Gross margin</dt><dd>{formatGrossMargin(selectedPlacementProduct)}</dd></div>
+                <div><dt>Days of supply</dt><dd>{selectedSupply && <i className={`supply-swatch ${selectedSupply.band}`} aria-hidden="true"/>}{formatDaysSupply(selectedSupply)}{selectedSupply && ` · ${selectedSupply.stocked_units} units on shelf`}</dd></div>
                 <div><dt>Period</dt><dd>{selectedPlacementProduct.performance.period}</dd></div>
               </dl>
               <p className="performance-source"><strong>Illustrative data</strong><span>{selectedPlacementProduct.performance.source}</span></p>
@@ -897,9 +922,9 @@ export function App() {
 
           <section className="inspector-section companion" aria-labelledby="companion-heading">
             <div className="companion-heading"><div><span className="section-label">Accessible companion</span><h2 id="companion-heading">Fixture outline</h2></div><span>{shelves.length} levels</span></div>
-            <p className="sr-only">Fixture width {context && formatImperial(context.fixture.width)} and height {context && formatImperial(context.fixture.height)}. Current revision {context?.revision ?? 0}. Placement entries identify loose or tray stocking, resolved facings, stocked units, and loaded footprint. Keyboard commands: arrow keys move a selected adjustable shelf one inch or move a selected placement left and right in 1/8-inch increments. Placement shelf and position can be changed together in the inspector. Plus and minus keys add or remove one horizontal facing of a selected loose placement, and the inspector sets wide, high, and deep facings; adding, removing or resizing a product re-spaces its shelf so neighboring units of the same product stay tightly packed and the product blocks are spaced evenly, and loaded trays keep their preset facings. Selected shelves can pack, center, space between, or space product blocks evenly while keeping a 1/8-inch minimum gap. Delete or Backspace removes a selected product placement. The base deck is fixed.</p>
+            <p className="sr-only">Fixture width {context && formatImperial(context.fixture.width)} and height {context && formatImperial(context.fixture.height)}. Current revision {context?.revision ?? 0}. Placement entries identify loose or tray stocking, resolved facings, stocked units, loaded footprint, and simulated days of supply for the product across the fixture. Keyboard commands: arrow keys move a selected adjustable shelf one inch or move a selected placement left and right in 1/8-inch increments. Placement shelf and position can be changed together in the inspector. Plus and minus keys add or remove one horizontal facing of a selected loose placement, and the inspector sets wide, high, and deep facings; adding, removing or resizing a product re-spaces its shelf so neighboring units of the same product stay tightly packed and the product blocks are spaced evenly, and loaded trays keep their preset facings. Selected shelves can pack, center, space between, or space product blocks evenly while keeping a 1/8-inch minimum gap. Delete or Backspace removes a selected product placement. The base deck is fixed.</p>
             <ol className="shelf-list">
-              {shelves.filter(shelf=>!activeBay||shelf.section_id===activeBay).map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelfLabel(shelf.id)}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = product ? productTitle(product) : `Product ${placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
+              {shelves.filter(shelf=>!activeBay||shelf.section_id===activeBay).map(shelf => { const shelfPlacements = context?.placements.filter(placement => placement.shelf_id === shelf.id) ?? []; return <li key={shelf.id}><button className={selection?.kind === 'shelf' && shelf.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'shelf', id: shelf.id })} onKeyDown={event => keyboardMove(event, shelf)} aria-current={selection?.kind === 'shelf' && shelf.id === selection.id ? 'true' : undefined}><span><strong>{shelfLabel(shelf.id)}</strong><small>{shelf.kind === 'base_deck' ? 'Fixed · 22" deep' : 'Adjustable · 16" deep'} · {shelfPlacements.length} {shelfPlacements.length === 1 ? 'placement' : 'placements'}</small></span><output>{formatImperial(shelf.elevation)}</output></button>{shelfPlacements.length > 0 && <ul className="placement-list">{shelfPlacements.map(placement => { const product = products.find(item => item.id === placement.product_id); const label = product ? productTitle(product) : `Product ${placement.id}`; return <li key={placement.id}><div className="companion-placement"><button className={selection?.kind === 'placement' && placement.id === selection.id ? 'selected' : ''} onClick={() => selectTarget({ kind: 'placement', id: placement.id })} onKeyDown={event => keyboardSelection(event, placement.id)} aria-current={selection?.kind === 'placement' && placement.id === selection.id ? 'true' : undefined}><span><strong>{label}</strong><small>{product?.size_oz} · at {formatImperial(placement.x)} · {placementStockingLabel(placement)} · footprint {formatImperial(placement.geometry.display_width)} W × {formatImperial(placement.geometry.display_height)} H × {formatImperial(placement.geometry.required_depth)} D · supply {formatDaysSupply(supplyByProduct.get(placement.product_id))}</small>{product && <span className="sr-only">{productAccessibilitySummary(product)}</span>}</span></button><div className="companion-placement-actions" aria-label={`${label} movement controls`}><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x - 2, 'inspector')} aria-label={`Move ${label} left 1/8 inch`}>←</button><button disabled={context?.version_status === 'published'} type="button" onClick={() => issuePlacementMove(placement, placement.shelf_id, placement.x + 2, 'inspector')} aria-label={`Move ${label} right 1/8 inch`}>→</button></div></div></li>; })}</ul>}</li>; })}
             </ol>
           </section>
         </aside>}

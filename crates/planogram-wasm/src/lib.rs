@@ -220,6 +220,7 @@ impl PlanogramEngine {
             fixture: &'a planogram_core::Fixture,
             products: &'a [planogram_core::Product],
             placements: Vec<planogram_core::PlacementView>,
+            sku_supply: Vec<planogram_core::SkuSupply>,
             latest_change_set_id: Option<&'a str>,
             latest_undoable_change_set_id: Option<&'a str>,
         }
@@ -232,6 +233,7 @@ impl PlanogramEngine {
             fixture: &self.document.draft().fixture,
             products: &self.document.draft().products,
             placements: self.document.draft().placement_views(),
+            sku_supply: self.document.draft().sku_supply(),
             latest_change_set_id: self
                 .document
                 .draft()
@@ -702,6 +704,15 @@ impl PlanogramEngine {
                 .map(|renderer| renderer.model.placement_labels(min_width, min_height))
                 .unwrap_or_default(),
         )
+    }
+
+    /// Display-only: tints placements by days-of-supply band. Never changes
+    /// geometry, revision or history.
+    pub fn set_supply_overlay(&mut self, enabled: bool) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.model.supply_overlay = enabled;
+            let _ = renderer.render();
+        }
     }
 
     pub fn select_shelf(&mut self, shelf_id: String) {

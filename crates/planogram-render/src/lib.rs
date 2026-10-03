@@ -81,6 +81,8 @@ pub struct RenderModel {
     pub selected: Option<Selection>,
     pub drag: Option<DragPreview>,
     pub validation_error: Option<String>,
+    /// Tint placements by their SKU's days-of-supply band instead of brand.
+    pub supply_overlay: bool,
     viewport_width: f32,
     viewport_height: f32,
 }
@@ -99,6 +101,7 @@ impl RenderModel {
             selected: None,
             drag: None,
             validation_error: None,
+            supply_overlay: false,
             viewport_width: 1.0,
             viewport_height: 1.0,
         }
@@ -171,6 +174,7 @@ impl RenderModel {
 
     pub fn apply_patch(&mut self, patch: &ScenePatch) {
         self.clear_proposal_preview();
+        self.scene.sku_supply = patch.sku_supply.clone();
         for updated in &patch.shelves {
             if let Some(current) = self
                 .scene
@@ -393,7 +397,10 @@ impl RenderModel {
 mod paint {
     use super::{RenderModel, Selection};
     use bytemuck::{Pod, Zeroable};
-    use planogram_core::{Length, PackageShape, PlacementSceneNode, ShelfKind, StockingMode};
+    use planogram_core::{
+        Length, PackageShape, PlacementSceneNode, ProductId, ShelfKind, StockingMode, SupplyBand,
+    };
+    use std::collections::HashMap;
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
@@ -420,6 +427,16 @@ mod paint {
     const PROPOSAL_FILL: Rgba = [0.95, 0.63, 0.16, 0.24];
     const REMOVED: Rgba = [0.78, 0.20, 0.16, 0.9];
     const DRAG_GUIDE: Rgba = [0.94, 0.58, 0.08, 0.9];
+
+    pub(super) fn supply_color(band: SupplyBand) -> Rgba {
+        match band {
+            SupplyBand::UnderThreeDays => [0.78, 0.14, 0.13, 1.0],
+            SupplyBand::UnderSevenDays => [0.95, 0.56, 0.10, 1.0],
+            SupplyBand::UnderFourteenDays => [0.18, 0.60, 0.40, 1.0],
+            SupplyBand::FourteenDaysOrMore => [0.20, 0.40, 0.76, 1.0],
+            SupplyBand::NoDemand => [0.58, 0.60, 0.62, 1.0],
+        }
+    }
 
     const SHELF_THICKNESS: f32 = 5.0;
     const BASE_DECK_THICKNESS: f32 = 10.0;
@@ -645,7 +662,9 @@ mod paint {
         }
     }
 
-    fn paint_jar(p: &mut Painter, u: &Unit, body: Rgba, lid: Rgba) {
+    /// `paper` scales how far the printed label fades toward paper: 1.0 for
+    /// brand colors, lower so heat-map bands stay saturated.
+    fn paint_jar(p: &mut Painter, u: &Unit, body: Rgba, lid: Rgba, paper: f32) {
         if !u.detailed() {
             p.vgradient(
                 u.x1,
@@ -693,7 +712,7 @@ mod paint {
                 label_top,
                 u.x2 - w * 0.06,
                 label_bottom,
-                mix(body, PAPER, 0.74),
+                mix(body, PAPER, 0.74 * paper),
             );
             let stripe_y = label_top + (label_bottom - label_top) * 0.38;
             p.rect(
@@ -717,7 +736,7 @@ mod paint {
         p.vgradient(u.x1, u.y2 - 3.0, u.x2, u.y2, shade(0.0), shade(0.28));
     }
 
-    fn paint_box(p: &mut Painter, u: &Unit, body: Rgba, accent: Rgba) {
+    fn paint_box(p: &mut Painter, u: &Unit, body: Rgba, accent: Rgba, paper: f32) {
         if !u.detailed() {
             p.vgradient(
                 u.x1,
@@ -761,8 +780,8 @@ mod paint {
                 py1,
                 px2,
                 py2,
-                mix(body, PAPER, 0.58),
-                mix(body, PAPER, 0.36),
+                mix(body, PAPER, 0.58 * paper),
+                mix(body, PAPER, 0.36 * paper),
             );
             p.rect(px1, py2 - (py2 - py1) * 0.18, px2, py2, alpha(accent, 0.6));
         }
@@ -775,6 +794,7 @@ mod paint {
         model: &RenderModel,
         placement: &PlacementSceneNode,
         rect: (f32, f32, f32, f32),
+        supply: Option<SupplyBand>,
     ) {
         let (x1, top, x2, bottom) = rect;
         if matches!(
@@ -783,8 +803,20 @@ mod paint {
         ) {
             p.rect(x1 - 3.0, top - 3.0, x2 + 3.0, bottom + 3.0, SELECTED);
         }
-        let body = sku_color(placement.color, &placement.product_id.0);
-        let accent = package_accent(body, rgb(placement.lid_color));
+        let brand_body = sku_color(placement.color, &placement.product_id.0);
+        // The overlay keeps each package's shape and shading but swaps its
+        // brand color for the band, so the fixture reads as a heat map.
+        let (body, accent, paper) = match supply {
+            Some(band) => {
+                let tint = supply_color(band);
+                (mix(brand_body, tint, 0.88), darken(tint, 0.32), 0.3)
+            }
+            None => (
+                brand_body,
+                package_accent(brand_body, rgb(placement.lid_color)),
+                1.0,
+            ),
+        };
         let cols = placement.facings_x.max(1);
         let rows = if placement.stocking_mode == StockingMode::Tray {
             1
@@ -807,8 +839,8 @@ mod paint {
                     y2: bottom - unit_h * row as f32,
                 };
                 match placement.package_shape {
-                    PackageShape::Jar => paint_jar(p, &unit, body, accent),
-                    PackageShape::Box => paint_box(p, &unit, body, accent),
+                    PackageShape::Jar => paint_jar(p, &unit, body, accent, paper),
+                    PackageShape::Box => paint_box(p, &unit, body, accent, paper),
                 }
             }
         }
@@ -870,9 +902,25 @@ mod paint {
             }
         }
 
+        let bands: HashMap<&ProductId, SupplyBand> = if model.supply_overlay {
+            model
+                .scene
+                .sku_supply
+                .iter()
+                .map(|sku| (&sku.product_id, sku.band))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         for placement in &model.scene.placements {
             if let Some(rect) = model.placement_rect(placement) {
-                paint_placement(&mut p, model, placement, rect);
+                let supply = model.supply_overlay.then(|| {
+                    bands
+                        .get(&placement.product_id)
+                        .copied()
+                        .unwrap_or(SupplyBand::NoDemand)
+                });
+                paint_placement(&mut p, model, placement, rect, supply);
             }
         }
 
@@ -1226,7 +1274,7 @@ impl WebGpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use planogram_core::{CommandResult, DraftVersion, ProductId, VersionId};
+    use planogram_core::{CommandResult, DraftVersion, ProductId, SupplyBand, VersionId};
 
     fn multi_bay_scene(bay_count: i32) -> RenderScene {
         let mut draft = DraftVersion::default();
@@ -1252,6 +1300,42 @@ mod tests {
         }
         scene.width = Length::from_sixteenths(bay_width.sixteenths() * bay_count);
         scene
+    }
+
+    #[test]
+    fn supply_overlay_recolors_placements_from_patched_bands_without_moving_geometry() {
+        let mut model = RenderModel::new(multi_bay_scene(1));
+        model.resize(800.0, 600.0);
+        model.fit();
+        let positions =
+            |vertices: &[Vertex]| vertices.iter().map(|v| v.position).collect::<Vec<_>>();
+        let brand = scene_vertices(&model);
+
+        model.supply_overlay = true;
+        let healthy = scene_vertices(&model);
+        assert_eq!(
+            model.scene.sku_supply[0].band,
+            SupplyBand::UnderFourteenDays
+        );
+        assert_eq!(positions(&healthy), positions(&brand));
+        assert_ne!(healthy, brand);
+
+        let mut short = model.scene.sku_supply.clone();
+        short[0].band = SupplyBand::UnderThreeDays;
+        model.apply_patch(&ScenePatch {
+            revision: model.scene.revision,
+            shelves: Vec::new(),
+            placements: Vec::new(),
+            removed_placement_ids: Vec::new(),
+            sku_supply: short,
+            validation: Default::default(),
+        });
+        let critical = scene_vertices(&model);
+        assert_eq!(positions(&critical), positions(&brand));
+        assert_ne!(critical, healthy);
+
+        model.supply_overlay = false;
+        assert_eq!(scene_vertices(&model), brand);
     }
 
     #[test]
@@ -1320,6 +1404,7 @@ mod tests {
             shelves: Vec::new(),
             placements: vec![moved.clone()],
             removed_placement_ids: Vec::new(),
+            sku_supply: Vec::new(),
             validation: Default::default(),
         });
         let (new_x, _) =
@@ -1509,6 +1594,7 @@ mod tests {
             shelves: Vec::new(),
             placements: vec![moved.clone()],
             removed_placement_ids: Vec::new(),
+            sku_supply: Vec::new(),
             validation: Default::default(),
         });
         assert_eq!(
@@ -1528,6 +1614,7 @@ mod tests {
             shelves: Vec::new(),
             placements: Vec::new(),
             removed_placement_ids: vec![placement.id],
+            sku_supply: Vec::new(),
             validation: Default::default(),
         });
         assert!(renderer.scene.placements.is_empty());

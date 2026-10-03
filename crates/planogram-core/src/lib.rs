@@ -341,6 +341,49 @@ pub struct PlacementView {
     pub tray_front_lip_height: Option<Length>,
 }
 
+/// Simulated days of supply on the shelf, banded for display. The 7-day line
+/// matches the scenario's "stocked SKUs under 7 days" metric.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupplyBand {
+    UnderThreeDays,
+    UnderSevenDays,
+    UnderFourteenDays,
+    FourteenDaysOrMore,
+    NoDemand,
+}
+
+impl SupplyBand {
+    pub fn of(days_supply_millidays: Option<u64>) -> Self {
+        match days_supply_millidays {
+            None => Self::NoDemand,
+            Some(days) if days < 3_000 => Self::UnderThreeDays,
+            Some(days) if days < 7_000 => Self::UnderSevenDays,
+            Some(days) if days < 14_000 => Self::UnderFourteenDays,
+            Some(_) => Self::FourteenDaysOrMore,
+        }
+    }
+}
+
+/// Shelf stock of one placed SKU, summed over all its placements, against
+/// its assumed weekly demand. A simulated planning quantity, not a forecast.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkuSupply {
+    pub product_id: ProductId,
+    pub stocked_units: u64,
+    pub weekly_demand_milliunits: u64,
+    pub days_supply_millidays: Option<u64>,
+    pub band: SupplyBand,
+}
+
+/// Capacity units × 7 / weekly demand, in millidays; `None` without demand.
+pub(crate) fn days_supply(capacity_units: u64, demand_milliunits: u64) -> Option<u64> {
+    (demand_milliunits > 0).then(|| {
+        let days = u128::from(capacity_units) * 7_000_000 / u128::from(demand_milliunits);
+        days.min(u128::from(u64::MAX)) as u64
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShelfDistribution {
@@ -555,14 +598,18 @@ pub struct RenderScene {
     pub height: Length,
     pub shelves: Vec<ShelfSceneNode>,
     pub placements: Vec<PlacementSceneNode>,
+    pub sku_supply: Vec<SkuSupply>,
 }
 
+/// `sku_supply` is always the complete list, because one placement's change
+/// moves the days of supply of every placement of the same SKU.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScenePatch {
     pub revision: u64,
     pub shelves: Vec<ShelfSceneNode>,
     pub placements: Vec<PlacementSceneNode>,
     pub removed_placement_ids: Vec<PlacementId>,
+    pub sku_supply: Vec<SkuSupply>,
     pub validation: ValidationSummary,
 }
 
@@ -796,6 +843,33 @@ impl DraftVersion {
             .filter_map(|placement| {
                 self.product(&placement.product_id)
                     .map(|product| Self::placement_view_for(placement, product))
+            })
+            .collect()
+    }
+
+    pub(crate) fn stocked_units_by_product(&self) -> std::collections::BTreeMap<ProductId, u64> {
+        let mut units = std::collections::BTreeMap::new();
+        for view in self.placement_views() {
+            *units.entry(view.product_id).or_default() += u64::from(view.stocked_unit_count);
+        }
+        units
+    }
+
+    /// Days of supply for every placed SKU, in product-ID order.
+    pub fn sku_supply(&self) -> Vec<SkuSupply> {
+        self.stocked_units_by_product()
+            .into_iter()
+            .filter_map(|(product_id, stocked_units)| {
+                let product = self.product(&product_id)?;
+                let demand = product.performance.units_per_store_per_week_milliunits;
+                let days = days_supply(stocked_units, demand);
+                Some(SkuSupply {
+                    product_id,
+                    stocked_units,
+                    weekly_demand_milliunits: demand,
+                    days_supply_millidays: days,
+                    band: SupplyBand::of(days),
+                })
             })
             .collect()
     }
@@ -1289,6 +1363,7 @@ impl DraftVersion {
             height: self.fixture.height,
             shelves,
             placements,
+            sku_supply: self.sku_supply(),
         }
     }
 
@@ -2877,6 +2952,7 @@ impl DraftVersion {
                 shelves: Vec::new(),
                 placements,
                 removed_placement_ids,
+                sku_supply: scene.sku_supply,
                 validation,
             }),
         }
@@ -2912,8 +2988,8 @@ impl DraftVersion {
         self.next_change_set += 1;
         self.change_sets.push(change_set.clone());
         let validation = ValidationSummary::default();
-        let node = self
-            .render_scene()
+        let scene = self.render_scene();
+        let node = scene
             .shelves
             .into_iter()
             .find(|node| node.id == *shelf_id)
@@ -2926,6 +3002,7 @@ impl DraftVersion {
                 shelves: vec![node],
                 placements: Vec::new(),
                 removed_placement_ids: Vec::new(),
+                sku_supply: scene.sku_supply,
                 validation: validation.clone(),
             }),
             validation,
@@ -2964,8 +3041,8 @@ impl DraftVersion {
         };
         self.next_change_set += 1;
         self.change_sets.push(change_set.clone());
-        let node = self
-            .render_scene()
+        let scene = self.render_scene();
+        let node = scene
             .placements
             .into_iter()
             .find(|node| node.id == *placement_id)
@@ -2979,6 +3056,7 @@ impl DraftVersion {
                 shelves: Vec::new(),
                 placements: vec![node],
                 removed_placement_ids: Vec::new(),
+                sku_supply: scene.sku_supply,
                 validation: validation.clone(),
             }),
             validation,

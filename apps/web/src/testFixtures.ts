@@ -98,6 +98,7 @@ export function makeContext({ shelves, width = 768, ...overrides }: Partial<Engi
     },
     products: [],
     placements: [],
+    sku_supply: [],
     ...overrides,
   };
 }
@@ -131,7 +132,7 @@ export function readyPreview(revision: number, operations: unknown[] = [{ type: 
     operations,
     affected_ids: [],
     validation: { issues: [] },
-    preview_scene: { revision, fixture_id: 'fixture_standard_4ft', width: 768, height: 1344, shelves: [], placements: [] },
+    preview_scene: { revision, fixture_id: 'fixture_standard_4ft', width: 768, height: 1344, shelves: [], placements: [], sku_supply: [] },
   };
 }
 

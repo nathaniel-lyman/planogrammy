@@ -2630,3 +2630,73 @@ fn sales_allocation_infeasible_bay_minimum_changes_no_shelf_or_history() {
         allocate_sales(draft, &request)
     });
 }
+
+#[test]
+fn sku_supply_sums_every_placement_of_a_sku_and_patches_carry_the_full_list() {
+    let mut draft = DraftVersion::default();
+    let first = add(&mut draft, "jif_crunchy_16", "shelf_01").affected_ids[0].clone();
+    let second = add(&mut draft, "jif_crunchy_16", "shelf_02").affected_ids[0].clone();
+    add(&mut draft, "jif_creamy_16", "shelf_03");
+
+    // 2 loose units × 7 days / 5.8 units per week; the 3 × 4 tray holds 12.
+    let supply = draft.sku_supply();
+    assert_eq!(
+        supply
+            .iter()
+            .map(|sku| (
+                sku.product_id.0.as_str(),
+                sku.stocked_units,
+                sku.days_supply_millidays,
+                sku.band
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "jif_creamy_16",
+                12,
+                Some(8_000),
+                SupplyBand::UnderFourteenDays
+            ),
+            ("jif_crunchy_16", 2, Some(2_413), SupplyBand::UnderThreeDays),
+        ]
+    );
+    assert_eq!(draft.render_scene().sku_supply, supply);
+
+    // Widening one placement changes the SKU's days for its sibling too, so the
+    // patch carries every SKU even though it only re-renders one shelf.
+    let applied = expect_applied(set_facings(
+        &mut draft,
+        &first,
+        FacingsRequest {
+            facings_x: Some(3),
+            facings_y: None,
+            facings_z: None,
+        },
+    ));
+    assert!(!applied
+        .scene_patch
+        .placements
+        .iter()
+        .any(|node| node.id.0 == second));
+    let crunchy = applied
+        .scene_patch
+        .sku_supply
+        .iter()
+        .find(|sku| sku.product_id.0 == "jif_crunchy_16")
+        .unwrap();
+    assert_eq!(
+        (crunchy.stocked_units, crunchy.days_supply_millidays),
+        (4, Some(4_827))
+    );
+    assert_eq!(crunchy.band, SupplyBand::UnderSevenDays);
+    assert_eq!(applied.scene_patch.sku_supply, draft.sku_supply());
+}
+
+#[test]
+fn supply_bands_split_at_three_seven_and_fourteen_days() {
+    assert_eq!(SupplyBand::of(None), SupplyBand::NoDemand);
+    assert_eq!(SupplyBand::of(Some(2_999)), SupplyBand::UnderThreeDays);
+    assert_eq!(SupplyBand::of(Some(3_000)), SupplyBand::UnderSevenDays);
+    assert_eq!(SupplyBand::of(Some(7_000)), SupplyBand::UnderFourteenDays);
+    assert_eq!(SupplyBand::of(Some(14_000)), SupplyBand::FourteenDaysOrMore);
+}

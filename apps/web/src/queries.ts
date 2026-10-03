@@ -1,4 +1,4 @@
-import type { ChangeSet, EngineContext, Placement, Product, Selection, Shelf, StockingMode } from './types';
+import type { ChangeSet, EngineContext, Placement, Product, Selection, Shelf, SkuSupply, StockingMode } from './types';
 
 export interface ToolProduct {
   id: string;
@@ -111,6 +111,8 @@ export interface SectionToolResult {
       available_capacity_sixteenths: number;
       placements: ToolPlacement[];
     }>;
+    /** Fixture-wide days of supply for each SKU placed in this section. */
+    sku_supply: SkuSupply[];
   };
 }
 
@@ -349,6 +351,8 @@ function maxPlaceableWidth(shelf: Shelf, placements: Placement[]): number {
 export function getSection(context: EngineContext, sectionId: string): SectionToolResult | undefined {
   const section = context.fixture.sections.find(candidate => candidate.id === sectionId);
   if (!section) return undefined;
+  const shelfIds = new Set(section.shelves.map(shelf => shelf.id));
+  const sectionProductIds = new Set(context.placements.filter(placement => shelfIds.has(placement.shelf_id)).map(placement => placement.product_id));
   return {
     status: 'ok',
     section: {
@@ -374,6 +378,7 @@ export function getSection(context: EngineContext, sectionId: string): SectionTo
           placements: shelfPlacements.map(toToolPlacement),
         };
       }),
+      sku_supply: context.sku_supply.filter(sku => sectionProductIds.has(sku.product_id)),
     },
   };
 }

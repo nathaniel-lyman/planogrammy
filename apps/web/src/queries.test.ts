@@ -16,6 +16,13 @@ function availableCapacity(placements: Placement[], shelfWidth = 768): number {
 const rightLoosePlacement = loosePlacement({ x: 200 });
 
 describe('catalog query transport', () => {
+  it('passes Rust days of supply through for SKUs placed in the section only', () => {
+    const supply = (product_id: string, days: number | null) => ({ product_id, stocked_units: 12, weekly_demand_milliunits: 10_500, days_supply_millidays: days, band: 'under_fourteen_days' as const });
+    const context = { ...contextWithPlacements([trayPlacement()]), sku_supply: [supply(trayProduct.id, 8_000), supply('elsewhere_sku', 2_000)] };
+
+    expect(getSection(context, 'section_01')?.section.sku_supply).toEqual([supply(trayProduct.id, 8_000)]);
+  });
+
   it('distinguishes the audit-log tail from the next undoable change', () => {
     const context = {
       ...contextWithPlacements([]),

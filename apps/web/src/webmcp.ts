@@ -381,7 +381,7 @@ function schemas(): SiteToolDefinition[] {
     {
       name: 'planogram.get_section',
       title: 'Get section layout',
-      description: 'Reads one fixture section, its shelf bounds, largest horizontally placeable width after the required gap and x-grid, and current placements with Rust-derived display width, height, required depth, stocking mode, and stocked-unit count.',
+      description: 'Reads one fixture section, its shelf bounds, largest horizontally placeable width after the required gap and x-grid, and current placements with Rust-derived display width, height, required depth, stocking mode, and stocked-unit count, plus simulated days of supply (stocked units × 7 ÷ assumed weekly units, summed across the fixture) and its band for each SKU in the section.',
       inputSchema: {
         type: 'object',
         properties: { section_id: { type: 'string', maxLength: 120 } },

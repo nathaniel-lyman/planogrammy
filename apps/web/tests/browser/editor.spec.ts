@@ -587,6 +587,43 @@ test('synthetic eight-to-six challenge edits alternatives and preserves baseline
   expect(errors).toEqual([]);
 });
 
+test('days-of-supply overlay shows Rust bands without changing the draft and follows edits and alternatives', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await openEditorWithSiteTools(page);
+  await page.getByRole('button', { name: 'Cereal challenge', exact: true }).click();
+  await page.getByRole('button', { name: 'Start cereal challenge' }).click();
+  const legend = page.getByLabel('Days of supply legend');
+  const bandCounts = async () => (await legend.locator('li b').allTextContents()).map(text => Number.parseInt(text, 10));
+
+  await expect(legend).toBeHidden();
+  await page.getByRole('button', { name: 'Days of supply', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Days of supply', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(legend).toContainText('Under 3 days20 SKUs');
+  expect(await bandCounts()).toEqual([20, 61, 19, 0]);
+  await expectRevision(page, 0);
+
+  // The companion and WebMCP report the same Rust-derived value for one SKU.
+  const section = await callSiteTool<{ section: { sku_supply: Array<{ product_id: string; days_supply_millidays: number; band: string }> } }>(page, 'planogram.get_section', { section_id: 'bay_01' });
+  const first = page.locator('.placement-list .companion-placement>button').first();
+  const companionSupply = (await first.textContent())?.match(/supply \d+\.\d days/)?.[0];
+  expect(section.section.sku_supply.map(sku => `supply ${(sku.days_supply_millidays / 1000).toFixed(1)} days`)).toContain(companionSupply);
+
+  await page.getByRole('combobox', { name: 'Scenario alternative' }).selectOption('-1');
+  expect(await bandCounts()).toEqual([4, 63, 27, 6]);
+  await page.getByRole('combobox', { name: 'Scenario alternative' }).selectOption('0');
+  await first.click();
+  await page.getByRole('button', { name: 'Remove product', exact: true }).click();
+  await skipUnlessRevision(page, 1);
+  expect((await bandCounts()).reduce((sum, count) => sum + count, 0)).toBe(99);
+
+  await page.getByRole('button', { name: 'Brand', exact: true }).click();
+  await expect(legend).toBeHidden();
+  await expect(page.locator('.canvas-help')).toBeVisible();
+  await expectRevision(page, 1);
+  expect(errors).toEqual([]);
+});
+
 test('cereal cross-bay movement is atomic and undoable; baseline and corrupted files are protected', async ({page})=>{
   await openEditorWithSiteTools(page);
   await page.getByRole('button',{name:'Cereal challenge',exact:true}).click();await page.getByRole('button',{name:'Start cereal challenge'}).click();
