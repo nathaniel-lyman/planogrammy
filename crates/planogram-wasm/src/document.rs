@@ -72,6 +72,17 @@ impl EditorDocument {
                 .unwrap_or(baseline),
         }
     }
+    /// The locked baseline to compare against while an alternative is active.
+    pub fn comparison_baseline(&self) -> Option<&DraftVersion> {
+        match self {
+            Self::Cereal {
+                baseline,
+                active: Some(_),
+                ..
+            } => Some(baseline),
+            _ => None,
+        }
+    }
     pub fn view(&self) -> Option<ScenarioView> {
         match self {
             Self::Bay { .. } => None,
@@ -178,6 +189,24 @@ mod tests {
         CommandResult, PreviewResult, ProductId, SalesAllocationBasis, SalesAllocationRequest,
         SalesAllocationScope, SalesAllocationTarget, ShelfId,
     };
+
+    #[test]
+    fn comparison_baseline_exists_only_while_an_alternative_is_active() {
+        let mut document = EditorDocument::cereal(20260930).unwrap();
+        assert_eq!(
+            document
+                .comparison_baseline()
+                .map(|draft| draft.id.0.as_str()),
+            Some("cereal_baseline")
+        );
+        document.select(-1).unwrap();
+        assert!(document.comparison_baseline().is_none());
+        assert!(EditorDocument::Bay {
+            draft: DraftVersion::default()
+        }
+        .comparison_baseline()
+        .is_none());
+    }
 
     fn allocation_round_trip(mut document: EditorDocument, request: SalesAllocationRequest) {
         let before = document.clone();

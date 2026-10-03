@@ -1749,6 +1749,8 @@ fn cereal_comparison_uses_explicit_fixed_point_units_and_full_assortment() {
     );
     assert_eq!(comparison.baseline.below_seven_days_sku_count, 67);
     assert_eq!(comparison.current.below_seven_days_sku_count, 81);
+    assert_eq!(comparison.baseline.below_three_days_sku_count, 4);
+    assert_eq!(comparison.current.below_three_days_sku_count, 20);
     for metrics in [&comparison.baseline, &comparison.current] {
         assert_eq!(metrics.distinct_sku_count, 100);
         assert_eq!(metrics.expected_sku_count, 100);

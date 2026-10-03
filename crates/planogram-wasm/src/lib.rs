@@ -5,8 +5,8 @@ mod golden;
 use document::EditorDocument;
 use planogram_core::{
     ChangeSetId, CommandResult, DraftVersion, FacingsRequest, Length, PlacementChange, PlacementId,
-    ProductId, SalesAllocationRequest, ShelfAllocationStrategy, ShelfDistribution, ShelfId,
-    VersionId,
+    ProductId, RenderScene, SalesAllocationRequest, ShelfAllocationStrategy, ShelfDistribution,
+    ShelfId, VersionId,
 };
 use planogram_render::{Selection, WebGpuRenderer};
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,8 @@ pub struct PlanogramEngine {
     document: EditorDocument,
     document_revision: u32,
     renderer: Option<WebGpuRenderer>,
+    /// Display preference: stack the locked baseline above the active alternative.
+    comparison: bool,
 }
 
 #[wasm_bindgen]
@@ -115,6 +117,7 @@ impl PlanogramEngine {
             },
             document_revision: 0,
             renderer: None,
+            comparison: false,
         }
     }
 
@@ -144,13 +147,8 @@ impl PlanogramEngine {
         }
         let (name, document) =
             bay_file::parse_document(&json).map_err(|error| JsValue::from_str(&error))?;
-        let scene = document.draft().render_scene();
         self.document = document;
-        self.document_revision += 1;
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.model.replace_scene(scene);
-            let _ = renderer.render();
-        }
+        self.document_changed();
         Ok(name)
     }
 
@@ -197,10 +195,39 @@ impl PlanogramEngine {
     fn document_changed(&mut self) {
         self.document_revision += 1;
         let scene = self.document.draft().render_scene();
+        let comparison = self.comparison_scene();
         if let Some(renderer) = self.renderer.as_mut() {
+            renderer.model.comparison_scene = comparison;
             renderer.model.replace_scene(scene);
             let _ = renderer.render();
         }
+    }
+    fn comparison_scene(&self) -> Option<RenderScene> {
+        self.comparison
+            .then(|| self.document.comparison_baseline())
+            .flatten()
+            .map(DraftVersion::render_scene)
+    }
+    /// Display-only: stacks the locked baseline above the active alternative
+    /// at the same scale. Never changes geometry, revision or history.
+    pub fn set_comparison(&mut self, enabled: bool) {
+        self.comparison = enabled;
+        let scene = self.comparison_scene();
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.model.comparison_scene = scene;
+            renderer.model.fit();
+            let _ = renderer.render();
+        }
+    }
+    /// Screen rectangles (CSS px) of the compared fixtures, for captions.
+    pub fn fixture_frames(&self) -> Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.model.fixture_frames())
+                .unwrap_or_default(),
+        )
     }
     pub fn focus_bay(&mut self, shelf_id: String) {
         if let Some(renderer) = self.renderer.as_mut() {

@@ -136,6 +136,16 @@ export interface PlacementLabel {
   height: number;
 }
 
+/** Screen rectangle (CSS px) of one fixture in the stacked comparison, derived by the renderer. */
+export interface FixtureFrame {
+  role: 'current' | 'baseline' | 'removed';
+  fixture_width: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface RenderScene {
   revision: number;
   fixture_id: string;
@@ -284,9 +294,11 @@ export interface WasmEngine {
   pan_by(dx: number, dy: number): void;
   fit_fixture(): void;
   set_supply_overlay(enabled: boolean): void;
+  set_comparison(enabled: boolean): void;
+  fixture_frames(): FixtureFrame[];
 }
 
 export interface ScenarioMetrics {
- bay_count:number; distinct_sku_count:number; expected_sku_count:number; unplaced_product_ids:string[]; capacity_units:number; weekly_demand_milliunits:number; stocked_weekly_demand_milliunits:number; aggregate_days_supply_millidays:number|null; replenishment_turnovers_per_week_milli:number; below_seven_days_sku_count:number; validation_issue_count:number; within_six_bay_limit:boolean;
+ bay_count:number; distinct_sku_count:number; expected_sku_count:number; unplaced_product_ids:string[]; capacity_units:number; weekly_demand_milliunits:number; stocked_weekly_demand_milliunits:number; aggregate_days_supply_millidays:number|null; replenishment_turnovers_per_week_milli:number; below_seven_days_sku_count:number; below_three_days_sku_count:number; validation_issue_count:number; within_six_bay_limit:boolean;
 }
-export interface ScenarioView { seed:number; active:number|null; alternatives:string[]; comparison:{assumptions:Record<string,string|number>;baseline:ScenarioMetrics;current:ScenarioMetrics;products:Array<{product_id:string;description:string;weekly_demand_milliunits:number;baseline_capacity_units:number;current_capacity_units:number;baseline_days_supply_millidays:number|null;current_days_supply_millidays:number|null}>} }
+export interface ScenarioView { seed:number; active?:number|null; alternatives:string[]; comparison:{assumptions:Record<string,string|number>;baseline:ScenarioMetrics;current:ScenarioMetrics;products:Array<{product_id:string;description:string;weekly_demand_milliunits:number;baseline_capacity_units:number;current_capacity_units:number;baseline_days_supply_millidays:number|null;current_days_supply_millidays:number|null}>} }

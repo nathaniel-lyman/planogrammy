@@ -624,6 +624,45 @@ test('days-of-supply overlay shows Rust bands without changing the draft and fol
   expect(errors).toEqual([]);
 });
 
+test('baseline comparison stacks the locked eight bays above the target without changing either', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await openEditorWithSiteTools(page);
+  await page.getByRole('button', { name: 'Cereal challenge', exact: true }).click();
+  await page.getByRole('button', { name: 'Start cereal challenge' }).click();
+  const cards = page.getByRole('list', { name: 'Six-bay target compared with the eight-bay baseline' });
+  await expect(cards).toContainText('All kept');
+  await expect(cards.getByRole('listitem').filter({ hasText: 'SKUs under 3 days' })).toContainText(/20\s*from 4\s*\+16/);
+  await expect(cards.getByRole('listitem').filter({ hasText: 'Shelf capacity' })).toContainText('−26%');
+
+  const toggle = page.getByRole('button', { name: 'Compare with baseline' });
+  const captions = page.locator('.fixture-captions');
+  await expect(captions).toHaveCount(0);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(captions).toContainText("Eight-bay baseline · locked · 32' wide");
+  await expect(captions).toContainText("Six-bay target · 24' wide");
+  await expect(captions).toContainText("8' removed");
+
+  // The baseline sits above the caption row and is never selectable.
+  const gap = await page.locator('.comparison-gap').boundingBox();
+  if (!gap) throw new Error('Expected the comparison caption row');
+  await page.mouse.click(gap.x + 40, gap.y - 30);
+  await expect(page.getByText('Select a shelf or product on the canvas')).toBeVisible();
+  await expectRevision(page, 0);
+
+  await page.getByRole('combobox', { name: 'Scenario alternative' }).selectOption('-1');
+  await expect(toggle).toBeDisabled();
+  await expect(captions).toHaveCount(0);
+  await expect(page.getByRole('list', { name: 'Baseline metrics' })).not.toContainText('All kept');
+  await page.getByRole('combobox', { name: 'Scenario alternative' }).selectOption('0');
+  await expect(captions).toContainText("8' removed");
+  await toggle.click();
+  await expect(captions).toHaveCount(0);
+  await expectRevision(page, 0);
+  expect(errors).toEqual([]);
+});
+
 test('cereal cross-bay movement is atomic and undoable; baseline and corrupted files are protected', async ({page})=>{
   await openEditorWithSiteTools(page);
   await page.getByRole('button',{name:'Cereal challenge',exact:true}).click();await page.getByRole('button',{name:'Start cereal challenge'}).click();

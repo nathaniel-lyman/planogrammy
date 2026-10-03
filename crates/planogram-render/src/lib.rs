@@ -11,6 +11,9 @@ const FIT_MARGIN_Y: f32 = 124.0;
 /// sitting on it, so full shelves stay grabbable.
 const SHELF_GRAB_PRIORITY: f32 = 5.0;
 const SHELF_GRAB_TOLERANCE: f32 = 13.0;
+/// World-space gap between the editable fixture and the comparison baseline
+/// stacked above it, leaving room for the HTML captions.
+const COMPARISON_GAP: Length = Length::from_sixteenths(40 * 16);
 
 /// Device-px surface size for a CSS-px canvas. When the canvas would exceed
 /// the GPU's texture limit, the ratio is lowered uniformly so the fixture
@@ -72,6 +75,27 @@ pub struct PlacementLabel {
     pub height: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameRole {
+    Current,
+    Baseline,
+    /// Floor space the baseline has and the current fixture gave up.
+    Removed,
+}
+
+/// Screen rectangle (CSS px) of one fixture in the comparison view, for the
+/// HTML captions. `fixture_width` is the authoritative world width it shows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FixtureFrame {
+    pub role: FrameRole,
+    pub fixture_width: Length,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderModel {
     pub scene: RenderScene,
@@ -83,6 +107,9 @@ pub struct RenderModel {
     pub validation_error: Option<String>,
     /// Tint placements by their SKU's days-of-supply band instead of brand.
     pub supply_overlay: bool,
+    /// A locked fixture drawn above the editable one at the same scale for a
+    /// before/after view. Display only: never hit-tested, selected or dragged.
+    pub comparison_scene: Option<RenderScene>,
     viewport_width: f32,
     viewport_height: f32,
 }
@@ -102,6 +129,7 @@ impl RenderModel {
             drag: None,
             validation_error: None,
             supply_overlay: false,
+            comparison_scene: None,
             viewport_width: 1.0,
             viewport_height: 1.0,
         }
@@ -151,9 +179,11 @@ impl RenderModel {
         );
         let base_scale = self.fit_scale() / self.camera.zoom;
         self.camera.zoom = (scale / base_scale).clamp(0.35, 16.0);
-        self.camera.pan_x =
-            (self.scene.width.sixteenths() as f32 / 2.0 - bay_center) * self.fit_scale();
-        self.camera.pan_y = 0.0;
+        let (frame_width, frame_height) = self.frame();
+        let fitted = self.fit_scale();
+        self.camera.pan_x = (frame_width / 2.0 - bay_center) * fitted;
+        // Center the editable fixture even when a baseline is stacked above.
+        self.camera.pan_y = (self.scene.height.sixteenths() as f32 - frame_height) / 2.0 * fitted;
         true
     }
 
@@ -223,22 +253,85 @@ impl RenderModel {
         self.proposal_affected_ids.clear();
     }
 
+    /// World extent (sixteenths) that fitting frames: the editable fixture,
+    /// plus the comparison baseline stacked above it when one is shown. Both
+    /// share x = 0 so removed width reads directly against the baseline.
+    fn frame(&self) -> (f32, f32) {
+        let width = self.scene.width.sixteenths() as f32;
+        let height = self.scene.height.sixteenths() as f32;
+        match &self.comparison_scene {
+            Some(baseline) => (
+                width.max(baseline.width.sixteenths() as f32),
+                (self.comparison_lift() + baseline.height).sixteenths() as f32,
+            ),
+            None => (width, height),
+        }
+    }
+
+    /// World elevation of the comparison baseline's floor.
+    fn comparison_lift(&self) -> Length {
+        self.scene.height + COMPARISON_GAP
+    }
+
     fn fit_scale(&self) -> f32 {
-        let horizontal =
-            (self.viewport_width - FIT_MARGIN_X).max(120.0) / self.scene.width.sixteenths() as f32;
-        let vertical = (self.viewport_height - FIT_MARGIN_Y).max(180.0)
-            / self.scene.height.sixteenths() as f32;
+        let (frame_width, frame_height) = self.frame();
+        let horizontal = (self.viewport_width - FIT_MARGIN_X).max(120.0) / frame_width;
+        let vertical = (self.viewport_height - FIT_MARGIN_Y).max(180.0) / frame_height;
         horizontal.min(vertical) * self.camera.zoom
     }
 
     fn origin(&self) -> (f32, f32) {
         let scale = self.fit_scale();
+        let (frame_width, frame_height) = self.frame();
         (
-            (self.viewport_width - self.scene.width.sixteenths() as f32 * scale) / 2.0
-                + self.camera.pan_x,
-            (self.viewport_height + self.scene.height.sixteenths() as f32 * scale) / 2.0
-                + self.camera.pan_y,
+            (self.viewport_width - frame_width * scale) / 2.0 + self.camera.pan_x,
+            (self.viewport_height + frame_height * scale) / 2.0 + self.camera.pan_y,
         )
+    }
+
+    /// Screen rectangles of the stacked fixtures; empty without a comparison.
+    pub fn fixture_frames(&self) -> Vec<FixtureFrame> {
+        let Some(baseline) = &self.comparison_scene else {
+            return Vec::new();
+        };
+        let frame = |role, left: Length, right: Length, floor: Length, height: Length| {
+            let (x1, bottom) = self.world_to_screen(left, floor);
+            let (x2, top) = self.world_to_screen(right, floor + height);
+            FixtureFrame {
+                role,
+                fixture_width: right - left,
+                x: x1,
+                y: top,
+                width: x2 - x1,
+                height: bottom - top,
+            }
+        };
+        let mut frames = vec![
+            frame(
+                FrameRole::Baseline,
+                Length::ZERO,
+                baseline.width,
+                self.comparison_lift(),
+                baseline.height,
+            ),
+            frame(
+                FrameRole::Current,
+                Length::ZERO,
+                self.scene.width,
+                Length::ZERO,
+                self.scene.height,
+            ),
+        ];
+        if baseline.width > self.scene.width {
+            frames.push(frame(
+                FrameRole::Removed,
+                self.scene.width,
+                baseline.width,
+                Length::ZERO,
+                self.scene.height,
+            ));
+        }
+        frames
     }
 
     pub fn world_to_screen(&self, x: Length, y: Length) -> (f32, f32) {
@@ -255,15 +348,25 @@ impl RenderModel {
         &self,
         placement: &planogram_core::PlacementSceneNode,
     ) -> Option<(f32, f32, f32, f32)> {
-        let shelf = self
-            .scene
+        self.placement_rect_in(&self.scene, placement, Length::ZERO)
+    }
+
+    /// Screen rectangle of a placement of `scene` drawn `lift` above the floor.
+    fn placement_rect_in(
+        &self,
+        scene: &RenderScene,
+        placement: &planogram_core::PlacementSceneNode,
+        lift: Length,
+    ) -> Option<(f32, f32, f32, f32)> {
+        let shelf = scene
             .shelves
             .iter()
             .find(|shelf| shelf.id == placement.shelf_id)?;
-        let (x1, shelf_y) = self.world_to_screen(shelf.x + placement.x, shelf.elevation);
+        let floor = shelf.elevation + lift;
+        let (x1, shelf_y) = self.world_to_screen(shelf.x + placement.x, floor);
         let (x2, product_top) = self.world_to_screen(
             shelf.x + placement.x + placement.width,
-            shelf.elevation + placement.height,
+            floor + placement.height,
         );
         Some((x1, product_top, x2, shelf_y))
     }
@@ -395,7 +498,7 @@ impl RenderModel {
 /// list of colored triangles. Everything here is presentation only; the
 /// authoritative geometry is read, never written.
 mod paint {
-    use super::{RenderModel, Selection};
+    use super::{RenderModel, RenderScene, Selection};
     use bytemuck::{Pod, Zeroable};
     use planogram_core::{
         Length, PackageShape, PlacementSceneNode, ProductId, ShelfKind, StockingMode, SupplyBand,
@@ -427,6 +530,8 @@ mod paint {
     const PROPOSAL_FILL: Rgba = [0.95, 0.63, 0.16, 0.24];
     const REMOVED: Rgba = [0.78, 0.20, 0.16, 0.9];
     const DRAG_GUIDE: Rgba = [0.94, 0.58, 0.08, 0.9];
+    const REMOVED_SPACE_FILL: Rgba = [0.78, 0.20, 0.16, 0.06];
+    const REMOVED_SPACE_EDGE: Rgba = [0.62, 0.28, 0.25, 0.55];
 
     pub(super) fn supply_color(band: SupplyBand) -> Rgba {
         match band {
@@ -789,18 +894,29 @@ mod paint {
         p.vgradient(u.x1, u.y2 - 3.0, u.x2, u.y2, shade(0.0), shade(0.25));
     }
 
+    /// One fixture to paint: the editable draft (`live`, which carries
+    /// selection and drag state) or a locked baseline lifted above it.
+    struct FixtureLayer<'a> {
+        scene: &'a RenderScene,
+        lift: Length,
+        live: bool,
+    }
+
     fn paint_placement(
         p: &mut Painter,
         model: &RenderModel,
+        layer: &FixtureLayer,
         placement: &PlacementSceneNode,
         rect: (f32, f32, f32, f32),
         supply: Option<SupplyBand>,
     ) {
         let (x1, top, x2, bottom) = rect;
-        if matches!(
-            &model.selected,
-            Some(Selection::Placement { id }) if id == &placement.id
-        ) {
+        if layer.live
+            && matches!(
+                &model.selected,
+                Some(Selection::Placement { id }) if id == &placement.id
+            )
+        {
             p.rect(x1 - 3.0, top - 3.0, x2 + 3.0, bottom + 3.0, SELECTED);
         }
         let brand_body = sku_color(placement.color, &placement.product_id.0);
@@ -846,14 +962,16 @@ mod paint {
         }
         if placement.stocking_mode == StockingMode::Tray {
             if let Some(front_lip_height) = placement.tray_front_lip_height {
-                let shelf = model
+                let shelf = layer
                     .scene
                     .shelves
                     .iter()
                     .find(|shelf| shelf.id == placement.shelf_id);
                 if let Some(shelf) = shelf {
-                    let (_, lip_top) = model
-                        .world_to_screen(shelf.x + placement.x, shelf.elevation + front_lip_height);
+                    let (_, lip_top) = model.world_to_screen(
+                        shelf.x + placement.x,
+                        shelf.elevation + front_lip_height + layer.lift,
+                    );
                     let lip_top = lip_top.max(top);
                     p.vgradient(x1, lip_top, x2, bottom, shade(0.30), shade(0.44));
                     p.rect(x1, lip_top, x2, lip_top + 1.5, glow(0.62));
@@ -862,20 +980,14 @@ mod paint {
         }
     }
 
-    pub fn scene_vertices(model: &RenderModel) -> Vec<Vertex> {
-        let (width, height) = model.viewport();
-        let mut p = Painter {
-            vertices: Vec::new(),
-            width,
-            height,
-        };
-        let (_, base_y) = model.world_to_screen(Length::ZERO, Length::ZERO);
-        let (_, top_y) = model.world_to_screen(model.scene.width, model.scene.height);
+    fn paint_fixture(p: &mut Painter, model: &RenderModel, layer: &FixtureLayer) {
+        let scene = layer.scene;
+        let (_, base_y) = model.world_to_screen(Length::ZERO, layer.lift);
+        let (_, top_y) = model.world_to_screen(scene.width, scene.height + layer.lift);
 
         // Each base deck identifies a physical bay: back panel, top rail and
         // uprights stay visible when the whole category is fitted.
-        for bay in model
-            .scene
+        for bay in scene
             .shelves
             .iter()
             .filter(|shelf| shelf.kind == ShelfKind::BaseDeck)
@@ -903,8 +1015,7 @@ mod paint {
         }
 
         let bands: HashMap<&ProductId, SupplyBand> = if model.supply_overlay {
-            model
-                .scene
+            scene
                 .sku_supply
                 .iter()
                 .map(|sku| (&sku.product_id, sku.band))
@@ -912,33 +1023,36 @@ mod paint {
         } else {
             HashMap::new()
         };
-        for placement in &model.scene.placements {
-            if let Some(rect) = model.placement_rect(placement) {
+        for placement in &scene.placements {
+            if let Some(rect) = model.placement_rect_in(scene, placement, layer.lift) {
                 let supply = model.supply_overlay.then(|| {
                     bands
                         .get(&placement.product_id)
                         .copied()
                         .unwrap_or(SupplyBand::NoDemand)
                 });
-                paint_placement(&mut p, model, placement, rect, supply);
+                paint_placement(p, model, layer, placement, rect, supply);
             }
         }
 
         // Shelves paint after products so the lip sits in front of what rests
         // on it and its shadow falls onto the shelf below.
-        for shelf in &model.scene.shelves {
+        for shelf in &scene.shelves {
             let elevation = model
                 .drag
                 .as_ref()
-                .filter(|drag| drag.shelf_id == shelf.id)
+                .filter(|drag| layer.live && drag.shelf_id == shelf.id)
                 .map(|drag| drag.elevation)
                 .unwrap_or(shelf.elevation);
-            let (left, y) = model.world_to_screen(shelf.x, elevation);
-            let right = model.world_to_screen(shelf.x + shelf.width, elevation).0;
-            let selected = matches!(
-                &model.selected,
-                Some(Selection::Shelf { id }) if id == &shelf.id
-            );
+            let (left, y) = model.world_to_screen(shelf.x, elevation + layer.lift);
+            let right = model
+                .world_to_screen(shelf.x + shelf.width, elevation + layer.lift)
+                .0;
+            let selected = layer.live
+                && matches!(
+                    &model.selected,
+                    Some(Selection::Shelf { id }) if id == &shelf.id
+                );
             let highlight = if model.validation_error.is_some() && selected {
                 Some(INVALID)
             } else if selected {
@@ -981,6 +1095,45 @@ mod paint {
                 }
             }
         }
+    }
+
+    pub fn scene_vertices(model: &RenderModel) -> Vec<Vertex> {
+        let (width, height) = model.viewport();
+        let mut p = Painter {
+            vertices: Vec::new(),
+            width,
+            height,
+        };
+        let (_, base_y) = model.world_to_screen(Length::ZERO, Length::ZERO);
+        let (_, top_y) = model.world_to_screen(model.scene.width, model.scene.height);
+
+        if let Some(baseline) = &model.comparison_scene {
+            paint_fixture(
+                &mut p,
+                model,
+                &FixtureLayer {
+                    scene: baseline,
+                    lift: model.comparison_lift(),
+                    live: false,
+                },
+            );
+            // The floor space the baseline has and this fixture gave up.
+            if baseline.width > model.scene.width {
+                let (x1, _) = model.world_to_screen(model.scene.width, Length::ZERO);
+                let (x2, _) = model.world_to_screen(baseline.width, Length::ZERO);
+                p.rect(x1 + 5.0, top_y, x2, base_y, REMOVED_SPACE_FILL);
+                p.dashed_outline(x1 + 5.0, top_y, x2, base_y, REMOVED_SPACE_EDGE);
+            }
+        }
+        paint_fixture(
+            &mut p,
+            model,
+            &FixtureLayer {
+                scene: &model.scene,
+                lift: Length::ZERO,
+                live: true,
+            },
+        );
 
         if let Some(proposal_scene) = &model.proposal_scene {
             for placement in proposal_scene
@@ -1336,6 +1489,46 @@ mod tests {
 
         model.supply_overlay = false;
         assert_eq!(scene_vertices(&model), brand);
+    }
+
+    #[test]
+    fn comparison_stacks_the_baseline_above_at_one_scale_and_is_never_hit() {
+        let mut model = RenderModel::new(multi_bay_scene(6));
+        model.resize(900.0, 700.0);
+        assert!(model.fixture_frames().is_empty());
+        let alone = model.hit_test(450.0, 350.0);
+
+        model.comparison_scene = Some(multi_bay_scene(8));
+        let frames = model.fixture_frames();
+        let frame = |role| frames.iter().find(|frame| frame.role == role).unwrap();
+        let (baseline, current, removed) = (
+            frame(FrameRole::Baseline),
+            frame(FrameRole::Current),
+            frame(FrameRole::Removed),
+        );
+        assert!(baseline.y + baseline.height < current.y);
+        assert!((baseline.x - current.x).abs() < 0.01);
+        assert!((baseline.width / current.width - 8.0 / 6.0).abs() < 0.001);
+        assert!((baseline.height - current.height).abs() < 0.01);
+        assert_eq!(removed.fixture_width, Length::from_sixteenths(2 * 768));
+        assert!((removed.x - (current.x + current.width)).abs() < 0.01);
+        assert!(baseline.x + baseline.width <= 900.0 && current.y + current.height <= 700.0);
+
+        let inside_baseline = (
+            baseline.x + baseline.width / 2.0,
+            baseline.y + baseline.height / 2.0,
+        );
+        assert_eq!(model.hit_test(inside_baseline.0, inside_baseline.1), None);
+        let shelf = model.scene.shelves[1].clone();
+        let (x, y) = model.world_to_screen(shelf.x + Length::from_sixteenths(8), shelf.elevation);
+        assert!(matches!(
+            model.hit_test(x, y),
+            Some(HitTarget::Shelf { id }) if id == shelf.id
+        ));
+        assert!(!scene_vertices(&model).is_empty());
+
+        model.comparison_scene = None;
+        assert_eq!(model.hit_test(450.0, 350.0), alone);
     }
 
     #[test]

@@ -280,6 +280,8 @@ pub struct ScenarioMetrics {
     /// Sum of per-SKU demand/capacity, excluding missing SKUs (reported above).
     pub replenishment_turnovers_per_week_milli: u64,
     pub below_seven_days_sku_count: u32,
+    /// Stocked SKUs in the `SupplyBand::UnderThreeDays` band.
+    pub below_three_days_sku_count: u32,
     pub validation_issue_count: u32,
     pub within_six_bay_limit: bool,
 }
@@ -348,6 +350,7 @@ fn metrics(
     let mut stocked_demand = 0_u64;
     let mut turnovers = 0_u64;
     let mut below_seven = 0;
+    let mut below_three = 0;
     for (id, product) in catalog {
         let units = capacities.get(id).copied().unwrap_or(0);
         let weekly = product.performance.units_per_store_per_week_milliunits;
@@ -360,6 +363,9 @@ fn metrics(
             turnovers = turnovers.saturating_add(weekly / units);
             if u128::from(units) * 1_000 < u128::from(weekly) {
                 below_seven += 1;
+            }
+            if SupplyBand::of(days_supply(units, weekly)) == SupplyBand::UnderThreeDays {
+                below_three += 1;
             }
         }
     }
@@ -374,6 +380,7 @@ fn metrics(
         aggregate_days_supply_millidays: days_supply(capacity, stocked_demand),
         replenishment_turnovers_per_week_milli: turnovers,
         below_seven_days_sku_count: below_seven,
+        below_three_days_sku_count: below_three,
         validation_issue_count: draft.validate_planogram().validation.issues.len() as u32,
         within_six_bay_limit: draft.fixture.sections.len() <= 6
             && draft.fixture.width.sixteenths() <= DEFAULT_FIXTURE_WIDTH.sixteenths() * 6,

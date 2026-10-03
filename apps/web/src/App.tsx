@@ -9,7 +9,7 @@ import { searchProducts } from './queries';
 import { PlanogramSession, type ProposalApprovalSource, type SessionProposal } from './session';
 import { useUiStore } from './store';
 import { registerPlanogramWebMcp } from './webmcp';
-import type { ChangeSet, CommandResult, FacingsRequest, Placement, PlacementLabel, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, SkuSupply, StockingMode, SupplyBand, WasmEngine } from './types';
+import type { ChangeSet, CommandResult, FacingsRequest, FixtureFrame, Placement, PlacementLabel, Product, SalesAllocationRequest, Selection, Shelf, ShelfDistribution, SkuSupply, StockingMode, SupplyBand, WasmEngine } from './types';
 
 const CANVAS_ID = 'planogram-canvas';
 const SHELF_READY_TRAY_LABEL = 'Shelf-ready tray';
@@ -285,6 +285,9 @@ export function App() {
   const [labels, setLabels] = useState<PlacementLabel[]>([]);
   const [supplyOverlay, setSupplyOverlay] = useState(false);
   const supplyOverlayRef = useRef(supplyOverlay);
+  const [comparison, setComparison] = useState(false);
+  const comparisonRef = useRef(comparison);
+  const [frames, setFrames] = useState<FixtureFrame[]>([]);
   const [interacting, setInteracting] = useState(false);
   const [productQuery, setProductQuery] = useState('');
   const [brandFilter, setBrandFilter] = useState('All brands');
@@ -315,6 +318,13 @@ export function App() {
   const supplyLegend = useMemo(() => SUPPLY_BANDS
     .map(({ band, label }) => ({ band, label, count: (context?.sku_supply ?? []).filter(supply => supply.band === band).length }))
     .filter(entry => entry.band !== 'no_demand' || entry.count > 0), [context]);
+  const comparisonFrames = useMemo(() => {
+    const byRole = (role: FixtureFrame['role']) => frames.find(frame => frame.role === role);
+    const baseline = byRole('baseline');
+    const current = byRole('current');
+    return baseline && current ? { baseline, current, removed: byRole('removed') } : undefined;
+  }, [frames]);
+  const showComparison = (enabled: boolean) => { setComparison(enabled); comparisonRef.current = enabled; setActiveBay(''); sessionRef.current?.engine.set_comparison(enabled); setZoomLabel(100); refreshLabels(); };
   const showSupplyOverlay = (enabled: boolean) => { setSupplyOverlay(enabled); supplyOverlayRef.current = enabled; sessionRef.current?.engine.set_supply_overlay(enabled); };
   const selectedShelfPlacementCount = selectedShelf
     ? context?.placements.filter(placement => placement.shelf_id === selectedShelf.id).length ?? 0
@@ -464,6 +474,7 @@ export function App() {
   const refreshLabels = useCallback(() => {
     const engine = sessionRef.current?.engine;
     setLabels(engine ? engine.placement_labels(LABEL_MIN_WIDTH, LABEL_MIN_HEIGHT) : []);
+    setFrames(engine ? engine.fixture_frames() : []);
   }, []);
   useEffect(() => { refreshLabels(); }, [context, refreshLabels]);
 
@@ -494,6 +505,7 @@ export function App() {
         await engine.initialize_renderer(CANVAS_ID);
         if (cancelled) return;
         engine.set_supply_overlay(supplyOverlayRef.current);
+        engine.set_comparison(comparisonRef.current);
         session.refresh();
         const registration = await registerPlanogramWebMcp(session, () => useUiStore.getState().selection);
         if (cancelled) {
@@ -754,7 +766,7 @@ export function App() {
         </nav>
       </header>
 
-      {context?.scenario && <ScenarioPanel scenario={context.scenario} sessionRef={sessionRef} onChanged={resetView}/>}
+      {context?.scenario && <ScenarioPanel scenario={context.scenario} sessionRef={sessionRef} onChanged={resetView} comparison={comparison} onComparisonChange={showComparison}/>}
       <section className="workspace">
         <aside className="catalog" aria-label="Product catalog">
           <div className="catalog-header"><div><span className="section-label">Assortment</span><h1>Product library</h1></div><span>{filteredProducts.length} SKUs</span></div>
@@ -815,6 +827,13 @@ export function App() {
               return <div key={label.id} className={supplyOverlay && supply ? `placement-label supply ${supply.band}` : 'placement-label'} style={{ left: label.x, top: label.y, maxWidth: label.width }}>{supplyOverlay ? <><strong>{formatDaysSupply(supply)}</strong><span>{product.brand} · {product.size_oz}</span></> : <><strong>{product.brand}</strong><span>{productVariant(product)} · {product.size_oz}</span></>}</div>;
             })}
           </div>
+          {comparisonFrames && <div className="fixture-captions" aria-hidden="true">
+            <div className="comparison-gap" style={{ left: comparisonFrames.current.x, top: (comparisonFrames.baseline.y + comparisonFrames.baseline.height + comparisonFrames.current.y) / 2 }}>
+              <span className="fixture-caption baseline">▲ Eight-bay baseline · locked · {formatImperial(comparisonFrames.baseline.fixture_width)} wide</span>
+              <span className="fixture-caption current">▼ {context?.scenario?.alternatives[context.scenario.active ?? 0] ?? 'Current'} · {formatImperial(comparisonFrames.current.fixture_width)} wide</span>
+            </div>
+            {comparisonFrames.removed && <div className="removed-space" style={{ left: comparisonFrames.removed.x, top: comparisonFrames.removed.y, width: comparisonFrames.removed.width, height: comparisonFrames.removed.height }}><span>{formatImperial(comparisonFrames.removed.fixture_width)} removed</span></div>}
+          </div>}
           {!proposal && supplyOverlay && <div className="supply-legend" aria-label="Days of supply legend">{context?.sku_supply.length === 0 ? <ul><li>Add products to see their days of supply</li></ul> : <ul>{supplyLegend.map(entry => <li key={entry.band}><i className={`supply-swatch ${entry.band}`} aria-hidden="true"/>{entry.label}<b>{entry.count} {entry.count === 1 ? 'SKU' : 'SKUs'}</b></li>)}</ul>}<small>Simulated: shelf units × 7 ÷ assumed weekly units, per SKU</small></div>}
           {!proposal && !supplyOverlay && <div className="canvas-help">Select products or shelves · Arrows move selected products 1/8" · + / − change facings · Drag shelves at 1" · Scroll to zoom</div>}
           {proposal && <div className="proposal-legend" aria-label="Proposal preview legend"><span><Package size={13}/>Current placement</span><span><PackagePlus size={13}/>Proposed position</span></div>}
