@@ -12,6 +12,25 @@ const FIT_MARGIN_Y: f32 = 124.0;
 const SHELF_GRAB_PRIORITY: f32 = 5.0;
 const SHELF_GRAB_TOLERANCE: f32 = 13.0;
 
+/// Device-px surface size for a CSS-px canvas. When the canvas would exceed
+/// the GPU's texture limit, the ratio is lowered uniformly so the fixture
+/// renders at reduced resolution instead of failing to present at all.
+pub fn surface_extent(
+    css_width: u32,
+    css_height: u32,
+    pixel_ratio: f32,
+    max_dimension: u32,
+) -> (u32, u32) {
+    let css_width = css_width.max(1) as f32;
+    let css_height = css_height.max(1) as f32;
+    let max_dimension = max_dimension.max(1) as f32;
+    let ratio = pixel_ratio
+        .min(max_dimension / css_width)
+        .min(max_dimension / css_height);
+    let scale = |css: f32| ((css * ratio).round() as u32).clamp(1, max_dimension as u32);
+    (scale(css_width), scale(css_height))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
     pub zoom: f32,
@@ -1011,12 +1030,8 @@ mod webgpu {
                 .dyn_into::<web_sys::HtmlCanvasElement>()
                 .map_err(|_| "element is not a canvas")?;
             let pixel_ratio = (window.device_pixel_ratio() as f32).clamp(1.0, 4.0);
-            let css_width = canvas.client_width().max(1) as f32;
-            let css_height = canvas.client_height().max(1) as f32;
-            let width = (css_width * pixel_ratio).round() as u32;
-            let height = (css_height * pixel_ratio).round() as u32;
-            canvas.set_width(width);
-            canvas.set_height(height);
+            let css_width = canvas.client_width().max(1) as u32;
+            let css_height = canvas.client_height().max(1) as u32;
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::BROWSER_WEBGPU,
                 ..Default::default()
@@ -1042,6 +1057,12 @@ mod webgpu {
                 })
                 .await
                 .map_err(|error| error.to_string())?;
+            let (width, height) = surface_extent(
+                css_width,
+                css_height,
+                pixel_ratio,
+                device.limits().max_texture_dimension_2d,
+            );
             let capabilities = surface.get_capabilities(&adapter);
             let format = capabilities
                 .formats
@@ -1107,15 +1128,19 @@ mod webgpu {
                 pipeline,
                 pixel_ratio,
             };
-            renderer.model.resize(css_width, css_height);
+            renderer.model.resize(css_width as f32, css_height as f32);
             renderer.render()?;
             Ok(renderer)
         }
 
         /// `width` and `height` are CSS px; the surface is sized in device px.
         pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-            self.config.width = ((width.max(1) as f32) * self.pixel_ratio).round() as u32;
-            self.config.height = ((height.max(1) as f32) * self.pixel_ratio).round() as u32;
+            (self.config.width, self.config.height) = surface_extent(
+                width,
+                height,
+                self.pixel_ratio,
+                self.device.limits().max_texture_dimension_2d,
+            );
             self.surface.configure(&self.device, &self.config);
             self.model.resize(width as f32, height as f32);
             self.render()
@@ -1227,6 +1252,14 @@ mod tests {
         }
         scene.width = Length::from_sixteenths(bay_width.sixteenths() * bay_count);
         scene
+    }
+
+    #[test]
+    fn surface_extent_lowers_ratio_uniformly_past_the_texture_limit() {
+        assert_eq!(surface_extent(443, 900, 2.0, 8192), (886, 1800));
+        // A canvas stretched to 12,806 CSS px would need a 25,612 px texture.
+        assert_eq!(surface_extent(443, 12_806, 2.0, 8192), (283, 8192));
+        assert_eq!(surface_extent(0, 0, 2.0, 8192), (2, 2));
     }
 
     #[test]

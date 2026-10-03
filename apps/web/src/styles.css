@@ -274,7 +274,10 @@ dd { margin: 0; font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospac
 .scenario-detail {position:absolute;right:0;top:25px;width:min(850px,90vw);max-height:65vh;overflow:auto;z-index:10;padding:20px;background:#fffef9;border:1px solid #89998b;box-shadow:0 8px 30px #0003;font-size:12px;line-height:1.5;}
 .scenario-detail table {width:100%;border-collapse:collapse;text-align:left;}.scenario-detail td,.scenario-detail th {border-bottom:1px solid #ddd;padding:6px;}
 .baseline-note {padding:10px;background:#f1e8ca;font-size:12px;}
-@media(max-width:1100px){.scenario-metrics{gap:7px;grid-template-columns:110px repeat(6,minmax(70px,1fr));}.scenario-title{flex-wrap:wrap;}.app-shell.has-scenario{height:auto;min-height:100%;grid-template-rows:auto auto minmax(600px,1fr) 38px;}}
+@media(max-width:1100px){.scenario-metrics{gap:7px;grid-template-columns:110px repeat(6,minmax(70px,1fr));}.scenario-title{flex-wrap:wrap;}}
+/* Only the stacked layout scrolls the page; above it the shell must keep a
+   fixed height so the canvas never grows to fit the companion outline. */
+@media(max-width:840px){.app-shell.has-scenario{height:auto;min-height:100%;grid-template-rows:auto auto minmax(600px,1fr) 38px;}}
 fieldset.selection-panel {margin:0;min-width:0;border:0;border-bottom:1px solid var(--line);}
 .scenario-proxy-note {margin:5px 0 8px;font-size:10px;color:#626b60;}
 
